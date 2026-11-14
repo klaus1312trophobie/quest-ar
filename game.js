@@ -252,7 +252,7 @@ function popup(pos, text, color = '#ffffff', size = 0.07) {
 
 // ---------------------------------------------------------------- Raum (Ebenen)
 const Room = {
-  planes: [], map: new Map(), fallback: false, floorY: 0, haveReal: false, outlines: new THREE.Group(), outlineOpacity: 0.5,
+  planes: [], active: [], ceilY: 3, map: new Map(), fallback: false, floorY: 0, haveReal: false, outlines: new THREE.Group(), outlineOpacity: 0.5,
 };
 scene.add(Room.outlines);
 const outlineMat = new THREE.LineBasicMaterial({ color: 0x38f3ff, transparent: true, opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending });
@@ -320,16 +320,28 @@ function updateRealPlanes(frame, ref) {
   }
   computeFloor();
 }
+// Quest kann Planes mehrerer gescannter Räume liefern (auch anderer Stockwerke).
+// Boden = nächster Boden unter dem Kopf, Decke = nächste Decke darüber; alles außerhalb wird ignoriert.
+function containsXZ(p, pos) { _la.copy(pos).applyMatrix4(p.inv); return pip(_la.x, _la.z, p.poly); }
 function computeFloor() {
-  let floor = null, low = null;
+  const head = Player.head;
+  let floor = null, floorIn = false, ceil = null, ceilIn = false;
   for (const p of Room.planes) {
-    if (p.vertical) continue;
-    if (p.label === 'floor' && (!floor || p.area > floor.area)) floor = p;
-    if (!low || p.center.y < low.center.y) low = p;
+    if (p.vertical || !p.poly.length) continue;
+    const y = p.center.y;
+    if (p.label === 'floor' && y < head.y - 0.3) {
+      const inside = containsXZ(p, head);
+      if (!floor || (inside && !floorIn) || (inside === floorIn && y > floor.center.y)) { floor = p; floorIn = inside; }
+    }
+    if (p.label === 'ceiling' && y > head.y) {
+      const inside = containsXZ(p, head);
+      if (!ceil || (inside && !ceilIn) || (inside === ceilIn && y < ceil.center.y)) { ceil = p; ceilIn = inside; }
+    }
   }
-  if (floor) Room.floorY = floor.center.y;
-  else if (low && low.center.y < Player.head.y - 1.0) Room.floorY = low.center.y;
-  else Room.floorY = 0;
+  Room.floorY = floor ? floor.center.y : 0;
+  Room.ceilY = ceil ? ceil.center.y : Room.floorY + 3.0;
+  Room.active = Room.planes.filter((p) => p.poly.length && p.center.y > Room.floorY - 0.35 && p.center.y < Room.ceilY + 0.15);
+  for (const p of Room.planes) if (p.line) p.line.visible = Room.active.includes(p);
 }
 // Ersatzraum, falls keine Raumdaten vorliegen (5 x 5 m um den Spieler)
 function buildFallback() {
@@ -358,13 +370,14 @@ function buildFallback() {
 function clearFallback() {
   for (const p of Room.planes.slice()) if (!p.real) removePlane(p);
   Room.fallback = false;
+  computeFloor();
 }
 
 // Segment a->b gegen alle Ebenen. Liefert nächsten Treffer.
 const _la = new V3(), _lb = new V3();
 function raycastPlanes(a, b) {
   let best = null, bestT = Infinity, side = 1;
-  for (const p of Room.planes) {
+  for (const p of Room.active) {
     _la.copy(a).applyMatrix4(p.inv); _lb.copy(b).applyMatrix4(p.inv);
     if ((_la.y > 0) === (_lb.y > 0)) continue;
     const t = _la.y / (_la.y - _lb.y);
@@ -389,9 +402,16 @@ function roomFacingNormal(p) {
   if (n.dot(toHead) < 0) n.negate();
   return n;
 }
+// Punkt ist vom Kopf aus sichtbar (keine andere Fläche dazwischen)
+function visibleFromHead(w, plane) {
+  const dir = w.clone().sub(Player.head); const len = dir.length(); dir.normalize();
+  const h = raycastPlanes(Player.head, Player.head.clone().addScaledVector(dir, plane ? len + 0.05 : len));
+  if (!plane) return !h;
+  return !!h && (h.plane === plane || h.point.distanceTo(w) < 0.15);
+}
 // Zufallspunkt auf einer Wand in Wurfhöhe
 function randomWallPoint(minDist = 1.0) {
-  const walls = Room.planes.filter((p) => p.vertical && p.area > 0.5 && p.poly.length >= 3);
+  const walls = Room.active.filter((p) => p.vertical && p.area > 0.5 && p.poly.length >= 3 && !/window|door/.test(p.label));
   if (!walls.length) return null;
   const local = new V3();
   for (let tries = 0; tries < 80; tries++) {
@@ -404,18 +424,21 @@ function randomWallPoint(minDist = 1.0) {
     const flat = new V3(w.x - Player.head.x, 0, w.z - Player.head.z).length();
     if (flat < minDist && tries < 60) continue;
     if (Game.breaches.some((b) => b.pos.distanceTo(w) < 0.9) && tries < 70) continue;
+    if (!visibleFromHead(w, p)) continue;
     return { pos: w, normal: roomFacingNormal(p), plane: p };
   }
   return null;
 }
 function randomSurfacePoint() {
-  const tops = Room.planes.filter((p) => !p.vertical && p.normal.y > 0 && p.label !== 'floor' && p.center.y > Room.floorY + 0.25 && p.center.y < Room.floorY + 1.4 && p.area > 0.08);
+  const tops = Room.active.filter((p) => !p.vertical && p.label !== 'floor' && p.label !== 'ceiling' && p.center.y > Room.floorY + 0.25 && p.center.y < Room.floorY + 1.4 && p.area > 0.08);
   const local = new V3();
   for (let tries = 0; tries < 40 && tops.length; tries++) {
     const p = pick(tops);
     local.set(rand(p.min[0], p.max[0]) * 0.7, 0, rand(p.min[1], p.max[1]) * 0.7);
     if (!pip(local.x, local.z, p.poly)) continue;
-    return local.applyMatrix4(p.matrix);
+    const w = local.clone().applyMatrix4(p.matrix);
+    if (!visibleFromHead(w.clone().add(new V3(0, 0.05, 0)), null)) continue;
+    return w;
   }
   // sonst: Boden im Raum, 1-2 m entfernt
   for (let tries = 0; tries < 20; tries++) {
