@@ -667,6 +667,9 @@ const Hands = {
     }
     if (!this.list.some((h) => h.src && h.role === 'blaster')) dot.visible = false;
     // B/Y halten (xr-standard Button 5) = Spiel beenden
+    const aNow = this.list.some((h) => h.src?.gamepad?.buttons?.[4]?.pressed);
+    if (aNow && !this.aPrev && Game.state === 'intro') Setup.capture();
+    this.aPrev = aNow;
     const held = this.list.some((h) => h.src?.gamepad?.buttons?.[5]?.pressed);
     if (held) {
       this.exitT = (this.exitT || 0) + dt;
@@ -1635,6 +1638,64 @@ class Turret {
   remove() { this.dead = true; scene.remove(this.group); }
 }
 
+// ---------------------------------------------------------------- Einrichtungsphase vor dem Spiel
+const Setup = {
+  group: new THREE.Group(), t: 0, rebuildT: 0, captureUsed: false, msg: '', key: '',
+  fillMat: new THREE.MeshBasicMaterial({ color: 0x38f3ff, transparent: true, opacity: 0.12, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
+  begin() { this.t = 0; this.rebuildT = 0; this.scanned = false; this.key = ''; this.msg = ''; scene.add(this.group); },
+  end() { this.clear(); scene.remove(this.group); },
+  clear() { for (const c of [...this.group.children]) { this.group.remove(c); c.geometry?.dispose?.(); if (c.material && c.material !== this.fillMat) c.material.dispose(); } },
+  build() {
+    this.clear();
+    for (const p of Room.active) {
+      if (p.label === 'wall' || p.label === 'floor' || p.label === 'ceiling' || !p.poly.length || !p.real) continue;
+      const m = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(p.poly.map(([x, z]) => new THREE.Vector2(x, z)))), this.fillMat);
+      m.matrixAutoUpdate = false; m.matrix.copy(p.matrix).multiply(_occRot).premultiply(new THREE.Matrix4().makeTranslation(...roomFacingNormal(p).multiplyScalar(0.005).toArray()));
+      this.group.add(m);
+      const name = LABEL_DE[p.label] || p.label.toUpperCase();
+      const tex = textTexture(name, '#8ffcff', 48);
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+      sp.scale.set(0.06 * tex.userData.aspect, 0.06, 1); sp.position.copy(p.center).add(new V3(0, p.vertical ? 0 : 0.12, 0)).addScaledVector(roomFacingNormal(p), p.vertical ? 0.05 : 0);
+      this.group.add(sp);
+    }
+  },
+  stats() {
+    const real = Room.active.filter((p) => p.real);
+    const walls = real.filter((p) => p.label === 'wall').length;
+    const furn = real.filter((p) => !['wall', 'floor', 'ceiling', 'door', 'window', 'wall art'].includes(p.label)).length;
+    const ignored = Room.planes.filter((p) => p.real && !Room.active.includes(p)).length;
+    return { walls, furn, ignored, floor: !!Room.floorPlane, real: real.length };
+  },
+  update(dt) {
+    this.t += dt;
+    this.fillMat.opacity = 0.1 + 0.06 * Math.sin(this.t * 3);
+    if (!this.scanned && this.t > 1.5) { this.scanned = true; Scan.start(); }
+    this.rebuildT -= dt;
+    if (this.rebuildT <= 0 && this.t > 1.5) {
+      this.rebuildT = 1.5;
+      const st = this.stats();
+      const key = JSON.stringify(st) + this.msg;
+      if (key !== this.key) {
+        this.key = key; this.build();
+        let sub;
+        if (!st.real) sub = 'Kein Raum gefunden (virtueller Raum aktiv)\nA/X: Raum jetzt scannen\nAbzug: trotzdem starten';
+        else sub = `${st.walls} Wände · ${st.furn} Möbel · Boden ${st.floor ? 'erkannt' : 'fehlt'}${st.ignored ? `\n${st.ignored} Flächen anderer Räume ignoriert` : ''}\nAbzug: Start · A/X: Raum neu scannen`;
+        if (this.msg) sub = this.msg + '\n' + sub;
+        Banner.show('RAUM-EINRICHTUNG', sub, '#38f3ff', 0);
+      }
+    }
+  },
+  async capture() {
+    const session = renderer.xr.getSession();
+    if (this.captureUsed) { this.msg = 'Neuscan nur 1x pro Sitzung (B/Y halten und neu starten)'; this.key = ''; this.rebuildT = 0; return; }
+    if (!session || typeof session.initiateRoomCapture !== 'function') { this.msg = 'Neuscan hier nicht verfügbar: Quest-Einstellungen > Raumeinrichtung'; this.key = ''; this.rebuildT = 0; return; }
+    this.captureUsed = true;
+    try { await session.initiateRoomCapture(); this.msg = 'Raum aktualisiert'; }
+    catch (e) { this.msg = 'Raumscan abgebrochen'; }
+    this.key = ''; this.rebuildT = 0; this.scanned = false; this.t = 0.5;
+  },
+};
+
 // ---------------------------------------------------------------- Spiel
 const Game = {
   state: 'idle', wave: 0, breaches: [], enemies: [], bolts: [], orbs: [], hearts: [], powerups: [], slowT: 0, eggs: [], turrets: [], breakT: 0, waveSpawns: [], best: 0, overT: 0,
@@ -1646,8 +1707,8 @@ const Game = {
     return clamp(0.15 + Corruption.level * 0.5 + this.enemies.length * 0.05 + (boss ? 0.4 : 0), 0, 1);
   },
   intro() {
-    this.state = 'intro';
-    Banner.show('RISS-ALARM', `Abzug drücken zum Starten\nGriff: Hände tauschen · B/Y halten: Beenden${this.best ? '\nRekord: ' + this.best : ''}`, '#38f3ff', 0);
+    this.state = 'intro'; Setup.begin();
+    if (false) Banner.show('RISS-ALARM', `Abzug drücken zum Starten\nGriff: Hände tauschen · B/Y halten: Beenden${this.best ? '\nRekord: ' + this.best : ''}`, '#38f3ff', 0);
   },
   reset() {
     for (const e of this.enemies) e.remove();
@@ -1676,7 +1737,7 @@ const Game = {
     muzzleFlash(pos, dir); Sound.tone('square', 1400, 300, 0.06, 0.06, pos);
   },
   start() {
-    this.reset(); this.state = 'play'; Scan.start(); Banner.hide(); Music.start();
+    this.reset(); this.state = 'play'; Banner.hide(); Music.start();
     this.nextWave();
   },
   nextWave() {
@@ -1723,7 +1784,7 @@ const Game = {
   },
   onTrigger(h) {
     Sound.init(); Sound.ctx?.resume?.();
-    if (this.state === 'intro') { this.start(); return; }
+    if (this.state === 'intro') { if (Setup.t < 1.5) return; Setup.end(); this.start(); return; }
     if (this.state === 'over' && this.overT <= 0) { this.start(); return; }
   },
   fire(h) {
@@ -1796,6 +1857,7 @@ const Game = {
     for (const t of this.turrets) t.update(dt);
     this.turrets = this.turrets.filter((t) => !t.dead);
     Scan.update(rdt);
+    if (this.state === 'intro') Setup.update(rdt);
     this.powerups = this.powerups.filter((p) => !p.dead);
     this.enemies = this.enemies.filter((e) => !e.dead);
     for (const h of this.hearts) h.update(dt);
@@ -1949,7 +2011,7 @@ function loop(t, frame) {
     sessionTime += dt;
     if (!Room.haveReal && !Room.fallback && sessionTime > 2.5) {
       buildFallback();
-      if (Game.state === 'intro') Banner.show('RISS-ALARM', 'Keine Raumdaten: virtueller Raum aktiv\n(Quest: Raum einrichten für echte Wände)\nAbzug drücken zum Starten', '#38f3ff', 0);
+      Setup.key = '';
     }
     // Wandkonturen: im Intro deutlich, im Spiel dezent
     const targetOp = Game.state === 'play' ? 0.12 : 0.55;
@@ -1984,7 +2046,7 @@ async function setup() {
         requiredFeatures: ['local-floor'],
         optionalFeatures: ['plane-detection', 'hand-tracking'],
       });
-      session.addEventListener('end', () => { Music.stop(); document.getElementById('ui').style.display = 'flex'; Game.reset(); Game.state = 'idle'; Banner.hide(); clearFallback(); Room.haveReal = false; sessionTime = 0; });
+      session.addEventListener('end', () => { Music.stop(); Setup.end(); Setup.captureUsed = false; document.getElementById('ui').style.display = 'flex'; Game.reset(); Game.state = 'idle'; Banner.hide(); clearFallback(); Room.haveReal = false; sessionTime = 0; });
       await renderer.xr.setSession(session);
       document.getElementById('ui').style.display = 'none';
       sessionTime = 0;
@@ -1996,4 +2058,4 @@ renderer.setAnimationLoop(loop);
 setup();
 
 // Für automatisierte Tests
-window.__game = { Game, Player, Room, Hands, THREE, Corruption, PowerUp, Music, Egg, Turret, Scan };
+window.__game = { Game, Player, Room, Hands, THREE, Corruption, PowerUp, Music, Egg, Turret, Scan, Setup };
