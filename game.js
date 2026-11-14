@@ -258,6 +258,9 @@ const Room = {
   planes: [], active: [], ceilY: 3, map: new Map(), fallback: false, floorY: 0, haveReal: false, outlines: new THREE.Group(), outlineOpacity: 0.5,
 };
 scene.add(Room.outlines);
+const occMat = new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 2 });
+const occGroup = new THREE.Group(); scene.add(occGroup);
+const _occRot = new THREE.Matrix4().makeRotationX(Math.PI / 2);
 const outlineMat = new THREE.LineBasicMaterial({ color: 0x38f3ff, transparent: true, opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending });
 
 function pip(x, z, poly) {
@@ -282,6 +285,10 @@ function setPlanePoly(p, poly) {
   p.line = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), outlineMat);
   p.line.matrixAutoUpdate = false;
   Room.outlines.add(p.line);
+  if (p.occ) { occGroup.remove(p.occ); p.occ.geometry.dispose(); }
+  p.occ = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(poly.map(([x, z]) => new THREE.Vector2(x, z)))), occMat);
+  p.occ.matrixAutoUpdate = false; p.occ.renderOrder = -10; p.occ.matrix.copy(p.matrix).multiply(_occRot);
+  occGroup.add(p.occ);
 }
 function setPlaneMatrix(p, arr) {
   if (arr) p.matrix.fromArray(arr);
@@ -290,12 +297,14 @@ function setPlaneMatrix(p, arr) {
   p.center.setFromMatrixPosition(p.matrix);
   p.vertical = Math.abs(p.normal.y) < 0.5;
   if (p.line) p.line.matrix.copy(p.matrix);
+  if (p.occ) p.occ.matrix.copy(p.matrix).multiply(_occRot);
 }
 function newPlane(label, real) {
   return { real, label: label || '', matrix: new THREE.Matrix4(), inv: new THREE.Matrix4(), normal: new V3(), center: new V3(), poly: [], area: 0, vertical: false, lastChanged: -1, line: null };
 }
 function removePlane(p) {
   if (p.line) { Room.outlines.remove(p.line); p.line.geometry.dispose(); }
+  if (p.occ) { occGroup.remove(p.occ); p.occ.geometry.dispose(); }
   const i = Room.planes.indexOf(p); if (i >= 0) Room.planes.splice(i, 1);
 }
 
@@ -345,7 +354,7 @@ function computeFloor() {
   Room.floorY = floor ? floor.center.y : 0;
   Room.ceilY = ceil ? ceil.center.y : Room.floorY + 3.0;
   Room.active = Room.planes.filter((p) => p.poly.length && p.center.y > Room.floorY - 0.35 && p.center.y < Room.ceilY + 0.15);
-  for (const p of Room.planes) if (p.line) p.line.visible = Room.active.includes(p);
+  for (const p of Room.planes) { const a = Room.active.includes(p); if (p.line) p.line.visible = a; if (p.occ) p.occ.visible = a && p.real; }
 }
 // Ersatzraum, falls keine Raumdaten vorliegen (5 x 5 m um den Spieler)
 function buildFallback() {
@@ -862,6 +871,7 @@ class Enemy {
     if (Math.random() < chance) for (let i = 0; i < (isBoss ? 2 : 1); i++) Game.powerups.push(new PowerUp(this.pos.clone().add(new V3(rand(-0.2, 0.2), 0.1, rand(-0.2, 0.2))), pick(Object.keys(POWER))));
     Player.addScore(base, this.pos.clone().add(new V3(0, this.r + 0.08, 0)), extra);
     Particles.burst(this.pos, this.color, 30, 2.2, 0.03 * (this.r / 0.08));
+    if (!(this instanceof Boss)) { const fp = this.pos.clone(); fp.y = Room.floorY; for (let i = 0; i < 2 + (this.brute ? 3 : 0); i++) Corruption.addCrystal(fp.clone().add(new V3(rand(-0.12, 0.12), 0, rand(-0.12, 0.12))), new V3(0, 1, 0), rand(0.02, 0.05) * (this.brute ? 1.6 : 1), this.color); }
     flash(this.pos, this.color, this.r * 5, 0.3);
     Sound.explode(this.pos, this.r > 0.2);
     this.remove();
@@ -889,6 +899,8 @@ class Crawler extends Enemy {
     if (brute) { for (let i = 0; i < 3; i++) { const sp = new THREE.Mesh(G.crystal, this.mat); sp.scale.set(0.015 * s, 0.05 * s, 0.015 * s); sp.position.set(0, 0.05 * s, (i - 1) * 0.04 * s); this.group.add(sp); } }
     this.group.add(this.body, this.head, e1, e2);
     this.shadow = new THREE.Mesh(G.plane, M.shadow); this.shadow.rotation.x = -Math.PI / 2; this.shadow.scale.setScalar(0.22 * s); scene.add(this.shadow);
+    const ug = new THREE.Mesh(G.plane, additive(this.color, 0.55)); ug.rotation.x = -Math.PI / 2; ug.position.y = 0.002; ug.scale.setScalar(2.2); this.shadow.add(ug);
+    const eg = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xffee55, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.7 })); eg.scale.setScalar(0.06 * s); eg.position.set(0, 0.025 * s, -0.11 * s); this.group.add(eg);
     this.start = this.pos.clone(); this.out = this.pos.clone().addScaledVector(breach.normal, 0.25 * s);
     this.group.lookAt(this.group.position.clone().sub(breach.normal)); this.group.rotateY(Math.PI);
     this.group.scale.setScalar(0.01);
@@ -969,6 +981,7 @@ class Drone extends Enemy {
     this.group.position.copy(this.pos); this.group.position.y += Math.sin(this.t * 3) * 0.03;
     this.ring.rotation.z += dt * 4;
     this.group.lookAt(Player.head);
+    if (Math.random() < dt * 25) Particles.burst(this.group.position.clone().add(new V3(0, -0.07, 0)), 0xc86bff, 1, 0.25, 0.01, -0.2, 0.5);
     if (this.t > 1.2) {
       this.shootT -= dt;
       this.eye.scale.setScalar(0.022 + (this.shootT < 0.6 ? 0.02 * (1 - this.shootT / 0.6) : 0));
@@ -1260,6 +1273,12 @@ const Corruption = {
       return;
     }
   },
+  addCrystal(pos, nn, h, color) {
+    const i = this.cNext; this.cNext = (this.cNext + 1) % this.N;
+    const up = nn.clone().add(new V3(rand(-0.7, 0.7), 0, rand(-0.7, 0.7))).normalize();
+    this.cData[i] = { pos, q: new THREE.Quaternion().setFromUnitVectors(new V3(0, 1, 0), up), h, w: h * 0.4, t: 0, grow: 3, alive: true };
+    this.crystals.setColorAt(i, new THREE.Color(color)); this.crystals.instanceColor.needsUpdate = true;
+  },
   purge(origin) {
     this.purgeT = 1; this.debt += 0.35;
     for (const s of this.surfaces.values()) for (const q of s.seeds) { q.r *= 0.4; q.target *= 0.5; }
@@ -1491,7 +1510,7 @@ const Game = {
   },
   intro() {
     this.state = 'intro';
-    Banner.show('RISS-ALARM', 'Abzug drücken zum Starten\nGriff: Hände tauschen · B/Y halten: Beenden', '#38f3ff', 0);
+    Banner.show('RISS-ALARM', `Abzug drücken zum Starten\nGriff: Hände tauschen · B/Y halten: Beenden${this.best ? '\nRekord: ' + this.best : ''}`, '#38f3ff', 0);
   },
   reset() {
     for (const e of this.enemies) e.remove();
