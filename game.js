@@ -539,6 +539,14 @@ const Hands = {
       }
     }
     if (!this.list.some((h) => h.src && h.role === 'blaster')) dot.visible = false;
+    // B/Y halten (xr-standard Button 5) = Spiel beenden
+    const held = this.list.some((h) => h.src?.gamepad?.buttons?.[5]?.pressed);
+    if (held) {
+      this.exitT = (this.exitT || 0) + dt;
+      const left = Math.max(0, 1 - this.exitT);
+      if (!this.exitShown || Math.floor(left * 10) !== this.exitShown) { this.exitShown = Math.floor(left * 10); Banner.show('BEENDEN …', 'B/Y gedrückt halten', '#ff3fb4', 0.3); }
+      if (this.exitT >= 1) { this.exitT = 0; renderer.xr.getSession()?.end(); }
+    } else { this.exitT = 0; this.exitShown = 0; }
   },
 };
 
@@ -972,7 +980,7 @@ const Game = {
   },
   intro() {
     this.state = 'intro';
-    Banner.show('RISS-ALARM', 'Abzug drücken zum Starten\nGriff-Taste: Hände tauschen', '#38f3ff', 0);
+    Banner.show('RISS-ALARM', 'Abzug drücken zum Starten\nGriff: Hände tauschen · B/Y halten: Beenden', '#38f3ff', 0);
   },
   reset() {
     for (const e of this.enemies) e.remove();
@@ -1043,7 +1051,7 @@ const Game = {
     if (rec) { this.best = Player.score; try { localStorage.setItem('rissalarm-best', String(this.best)); } catch (e) { /* egal */ } }
     Sound.over();
     for (const b of this.breaches) b.close();
-    Banner.show('GAME OVER', `${Player.score} Punkte · Welle ${this.wave}\n${rec ? 'NEUER REKORD!' : 'Rekord: ' + this.best}`, '#ff3fb4', 0);
+    Banner.show('GAME OVER', `${Player.score} Punkte · Welle ${this.wave}\n${rec ? 'NEUER REKORD!' : 'Rekord: ' + this.best}\nAbzug: Neustart · B/Y halten: Beenden`, '#ff3fb4', 0);
   },
   update(dt) {
     // Wellen-Spawns
