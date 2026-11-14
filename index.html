@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Riss-Alarm</title>
+<style>
+  :root { --bg:#0b0618; --fg:#eae6ff; --accent:#38f3ff; --hot:#ff3fb4; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); font-family:system-ui,sans-serif; }
+  #ui { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px; padding:16px; text-align:center; z-index:2;
+        background: radial-gradient(circle at 50% 40%, #2a0f4a 0%, var(--bg) 70%); }
+  h1 { font-size:clamp(40px,9vw,88px); margin:0; letter-spacing:.06em; background:linear-gradient(90deg,var(--accent),var(--hot)); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  p { max-width:560px; line-height:1.5; margin:0; opacity:.9; }
+  button { font-size:28px; font-weight:700; padding:18px 44px; border-radius:999px; border:0; cursor:pointer; color:#0b0618;
+           background:linear-gradient(90deg,var(--accent),var(--hot)); box-shadow:0 0 40px #38f3ff66; }
+  button:disabled { opacity:.35; cursor:default; box-shadow:none; }
+  ul { text-align:left; max-width:560px; margin:0; padding-left:20px; line-height:1.6; opacity:.85; }
+  #msg { color:#ffb3d9; min-height:1.5em; }
+  canvas { position:fixed; inset:0; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <h1>RISS-ALARM</h1>
+  <p>Kristallwesen brechen durch die Wände deines echten Zimmers. Halte sie auf.</p>
+  <ul>
+    <li><b>Rechte Hand:</b> Blaster (Abzug). Schüsse prallen an echten Wänden ab, Bandenschüsse geben Bonus.</li>
+    <li><b>Linke Hand:</b> Schild. Fängt feindliche Geschosse und schleudert sie zurück.</li>
+    <li><b>Risse:</b> Schieß auf einen Riss in der Wand, um ihn zu versiegeln.</li>
+    <li><b>Nahkampf:</b> Schlag Krabbler mit dem Controller weg.</li>
+    <li><b>Herzen:</b> Erscheinen auf Tischen/Sofa. Hingehen und berühren.</li>
+    <li><b>Griff-Taste:</b> Hände tauschen (Linkshänder).</li>
+  </ul>
+  <button id="start" disabled>Prüfe AR …</button>
+  <div id="msg"></div>
+</div>
+<script type="module" src="./game.js"></script>
+</body>
+</html>
