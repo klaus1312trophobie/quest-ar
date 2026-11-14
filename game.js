@@ -863,7 +863,7 @@ class Enemy {
     this.dead = true;
     let extra = '';
     let base = this.pts;
-    if (bolt && bolt.bounces > 0) { base *= 1 + bolt.bounces; extra = ` BANDE x${1 + bolt.bounces}`; }
+    if (bolt && bolt.bounces > 0 && !bolt.turret) { base *= 1 + bolt.bounces; extra = ` BANDE x${1 + bolt.bounces}`; }
     if (bolt && bolt.reflected) { base *= 2; extra = ' KONTER'; }
     if (bolt && bolt.melee) { base *= 2; extra = ' SCHLAG'; }
     const isBoss = this instanceof Boss;
@@ -1408,6 +1408,7 @@ const POWER = {
   triple: { color: 0xffe14f, css: '#ffe14f', label: 'DREIFACHSCHUSS', dur: 12 },
   rapid: { color: 0xff7a3f, css: '#ff7a3f', label: 'SCHNELLFEUER', dur: 10 },
   slow: { color: 0xb18cff, css: '#b18cff', label: 'ZEITLUPE', dur: 6 },
+  turret: { color: 0x7dff6a, css: '#7dff6a', label: 'GESCHÜTZ', dur: 0 },
 };
 class PowerUp {
   constructor(pos, type) {
@@ -1434,7 +1435,8 @@ class PowerUp {
   collect() {
     if (this.dead) return;
     const P = POWER[this.type];
-    Player.power[this.type] = P.dur; HUD.dirty = true;
+    if (this.type === 'turret') Game.deployTurret(); else Player.power[this.type] = P.dur;
+    HUD.dirty = true;
     popup(this.group.position.clone(), P.label + '!', P.css, 0.07);
     Particles.burst(this.group.position, P.color, 30, 2, 0.02);
     [880, 1175, 1568].forEach((f, i) => Sound.tone('square', f, f, 0.1, 0.12, null, i * 0.05));
@@ -1461,6 +1463,7 @@ const Arrows = (() => {
       if (Game.state === 'play') {
         for (const b of Game.breaches) if (!b.closing) threats.push(b.pos);
         for (const e of Game.enemies) if (e instanceof Boss) threats.push(e.pos);
+        for (const e of Game.eggs) if (e.t / e.hatch > 0.5) threats.push(e.pos);
       }
       let k = 0;
       for (const p of threats) {
@@ -1498,9 +1501,143 @@ function scorch(point, normal) {
   if (scorches.length > 40) { const o = scorches.shift(); o.material.opacity = 0; }
 }
 
+// ---------------------------------------------------------------- Möbel: Scan, Eier, Geschütz
+const LABEL_DE = { table: 'TISCH', couch: 'SOFA', shelf: 'REGAL', bed: 'BETT', storage: 'SCHRANK', screen: 'BILDSCHIRM', lamp: 'LAMPE', plant: 'PFLANZE', door: 'TÜR', window: 'FENSTER', 'wall art': 'BILD', desk: 'SCHREIBTISCH', other: 'OBJEKT' };
+function furnitureTops() {
+  return Room.active.filter((p) => !p.vertical && p.poly.length && p.label !== 'floor' && p.label !== 'ceiling' && p.center.y > Room.floorY + 0.2 && p.center.y < Room.floorY + 1.6 && p.area > 0.05);
+}
+function randomPointOn(p, shrink = 0.75) {
+  for (let i = 0; i < 20; i++) {
+    const l = new V3(rand(p.min[0], p.max[0]) * shrink, 0, rand(p.min[1], p.max[1]) * shrink);
+    if (pip(l.x, l.z, p.poly)) return l.applyMatrix4(p.matrix);
+  }
+  return p.center.clone();
+}
+
+const Scan = {
+  active: false, t: 0, mesh: null, done: new Set(),
+  start() {
+    if (this.mesh) scene.remove(this.mesh);
+    const mat = new THREE.MeshBasicMaterial({ map: canvasTex(256, 256, (g) => {
+      g.strokeStyle = 'rgba(56,243,255,0.9)'; g.lineWidth = 2;
+      for (let i = 0; i <= 256; i += 32) { g.beginPath(); g.moveTo(i, 0); g.lineTo(i, 256); g.moveTo(0, i); g.lineTo(256, i); g.stroke(); }
+    }), transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+    mat.map.wrapS = mat.map.wrapT = THREE.RepeatWrapping; mat.map.repeat.set(8, 8);
+    this.mesh = new THREE.Mesh(new THREE.CircleGeometry(4, 48), mat); this.mesh.rotation.x = -Math.PI / 2;
+    scene.add(this.mesh);
+    this.active = true; this.t = 0; this.done.clear(); this.found = 0;
+    Sound.tone('sine', 200, 1200, 2.2, 0.12);
+  },
+  update(dt) {
+    if (!this.active) return;
+    this.t += dt;
+    const h = Room.ceilY - Room.floorY, k = this.t / 2.4, y = Room.floorY + k * h;
+    this.mesh.position.set(Player.head.x, y, Player.head.z);
+    this.mesh.material.opacity = 0.5 * (1 - k * 0.6);
+    for (const p of Room.active) {
+      if (this.done.has(p)) continue;
+      if (p.center.y > y) continue;
+      this.done.add(p);
+      if (!p.line) continue;
+      const line = new THREE.LineLoop(p.line.geometry, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+      line.material.userData.own = true; line.matrixAutoUpdate = false; line.matrix.copy(p.line.matrix);
+      addFx(line, 1.6, (o, kk) => { o.material.opacity = 1 - kk; o.material.color.setHSL(0.5, 1, 1 - kk * 0.4); });
+      const name = LABEL_DE[p.label];
+      if (name && p.label !== 'wall' && this.found < 8) {
+        this.found++;
+        popup(p.center.clone().add(new V3(0, 0.2, 0)), name + ' ERKANNT', '#8ffcff', 0.08);
+        Sound.tone('triangle', 1200 + this.found * 80, 1600, 0.08, 0.08, p.center);
+      }
+    }
+    if (k >= 1) { this.active = false; scene.remove(this.mesh); this.mesh.material.map.dispose(); this.mesh.material.dispose(); this.mesh = null; }
+  },
+};
+
+class Egg {
+  constructor(pos, plane) {
+    this.pos = pos.clone(); this.plane = plane; this.t = 0; this.hatch = rand(9, 13) - Math.min(4, Game.wave * 0.3); this.hp = 2; this.dead = false; this.r = 0.07;
+    this.group = new THREE.Group(); this.group.position.copy(this.pos);
+    this.mat = new THREE.MeshPhongMaterial({ color: 0x8ffcff, emissive: 0x1a6a80, shininess: 150, flatShading: true, transparent: true, opacity: 0.9 });
+    this.mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 1), this.mat); this.mesh.scale.set(0.045, 0.065, 0.045); this.mesh.position.y = 0.06;
+    this.core = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xff3fb4, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true })); this.core.position.y = 0.06; this.core.scale.setScalar(0.08);
+    const nest = new THREE.Mesh(G.plane, additive(0xff3fb4, 0.5)); nest.rotation.x = -Math.PI / 2; nest.position.y = 0.003; nest.scale.setScalar(0.3);
+    this.group.add(this.mesh, this.core, nest);
+    scene.add(this.group);
+    Corruption.addSeed(plane, pos, 0.25 + Corruption.level * 0.6);
+    for (let i = 0; i < 4; i++) Corruption.addCrystal(pos.clone().add(new V3(rand(-0.1, 0.1), 0, rand(-0.1, 0.1))), new V3(0, 1, 0), rand(0.02, 0.05), 0x8ffcff);
+    Particles.burst(pos, 0x8ffcff, 12, 0.8, 0.015);
+  }
+  get center() { return this.group.position.clone().add(new V3(0, 0.06, 0)); }
+  update(dt) {
+    this.t += dt;
+    const k = this.t / this.hatch;
+    const beat = 1 + Math.sin(this.t * (4 + k * 14)) * 0.06 * (0.3 + k);
+    this.mesh.scale.set(0.045 * beat, 0.065 * beat, 0.045 * beat);
+    this.mesh.rotation.y += dt * (0.5 + k * 3);
+    this.core.material.opacity = 0.4 + 0.6 * k; this.core.scale.setScalar(0.06 + 0.08 * k);
+    this.mat.emissive.setRGB(0.1 + k * 0.9, 0.4 * (1 - k), 0.5);
+    if (k > 0.7 && Math.random() < dt * 6) Particles.burst(this.center, 0xff3fb4, 1, 0.4, 0.01);
+    if (k >= 1 && Game.state === 'play') this.hatchNow();
+  }
+  hatchNow() {
+    const to = Player.head.clone().sub(this.pos); to.y = 0; to.normalize();
+    const n = to.multiplyScalar(0.7).add(new V3(0, 0.7, 0)).normalize();
+    const fake = { pos: this.pos.clone(), normal: n, spawnPoint: () => this.pos.clone().add(new V3(0, 0.05, 0)) };
+    Game.enemies.push(new Crawler(fake));
+    Particles.burst(this.center, 0x8ffcff, 25, 1.5, 0.02); Sound.crack(this.pos);
+    popup(this.center, 'GESCHLÜPFT!', '#ff3fb4', 0.05);
+    this.remove();
+  }
+  hit(point) {
+    this.hp--; Particles.burst(point, 0x8ffcff, 8, 1.2, 0.012); Sound.hit(point); this.mat.emissive.set(0xffffff);
+    if (this.hp <= 0) { Player.addScore(150, this.center, ' EI'); Particles.burst(this.center, 0x8ffcff, 30, 2, 0.02); Sound.explode(this.pos, false); this.remove(); }
+  }
+  remove() { this.dead = true; scene.remove(this.group); }
+}
+
+class Turret {
+  constructor(pos) {
+    this.pos = pos.clone(); this.t = 0; this.life = 15; this.dead = false; this.cool = 0.5;
+    this.group = new THREE.Group(); this.group.position.copy(this.pos);
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 0.04, 6), gunMetal); base.position.y = 0.02;
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.006, 6, 24), M.gunGlow); ring.rotation.x = Math.PI / 2; ring.position.y = 0.04;
+    this.head = new THREE.Group(); this.head.position.y = 0.08;
+    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.045, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), gunDark);
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.01, 0.09, 8).rotateX(Math.PI / 2), gunTrim); barrel.position.set(0, 0.015, -0.06);
+    const eye = new THREE.Mesh(G.sphere, M.gunGlow); eye.scale.setScalar(0.01); eye.position.set(0, 0.03, -0.035);
+    this.head.add(dome, barrel, eye);
+    this.muzzle = new THREE.Object3D(); this.muzzle.position.set(0, 0.015, -0.11); this.head.add(this.muzzle);
+    this.group.add(base, ring, this.head); this.group.scale.setScalar(0.01);
+    scene.add(this.group);
+    flash(this.pos, 0xff7a3f, 0.5, 0.4); Particles.burst(this.pos, 0xff7a3f, 20, 1.2, 0.015);
+    [523, 784, 1046].forEach((f, i) => Sound.tone('square', f, f, 0.08, 0.1, this.pos, i * 0.06));
+  }
+  update(dt) {
+    this.t += dt; this.life -= dt;
+    this.group.scale.setScalar(Math.min(1, this.t * 3));
+    let tgt = null, bd = 4.5;
+    for (const e of Game.enemies) { if (e.dead) continue; const d = e.pos.distanceTo(this.pos); if (d < bd) { bd = d; tgt = e; } }
+    for (const egg of Game.eggs) { const d = egg.pos.distanceTo(this.pos); if (d < bd * 0.8) { bd = d; tgt = { pos: egg.center }; } }
+    if (tgt) {
+      const hp = this.head.getWorldPosition(new V3());
+      const yaw = Math.atan2(-(tgt.pos.x - hp.x), -(tgt.pos.z - hp.z));
+      this.head.rotation.y += (((yaw - this.head.rotation.y + Math.PI * 3) % (Math.PI * 2)) - Math.PI) * Math.min(1, dt * 10);
+      this.cool -= dt;
+      if (this.cool <= 0 && this.t > 0.5) {
+        this.cool = 0.45;
+        const mp = this.muzzle.getWorldPosition(new V3());
+        Game.fireFrom(mp, tgt.pos.clone().sub(mp).normalize());
+      }
+    }
+    if (this.life < 2) this.group.visible = Math.floor(this.life * 8) % 2 === 0;
+    if (this.life <= 0) { Particles.burst(this.pos, 0xff7a3f, 20, 1.2, 0.015); this.remove(); }
+  }
+  remove() { this.dead = true; scene.remove(this.group); }
+}
+
 // ---------------------------------------------------------------- Spiel
 const Game = {
-  state: 'idle', wave: 0, breaches: [], enemies: [], bolts: [], orbs: [], hearts: [], powerups: [], slowT: 0, breakT: 0, waveSpawns: [], best: 0, overT: 0,
+  state: 'idle', wave: 0, breaches: [], enemies: [], bolts: [], orbs: [], hearts: [], powerups: [], slowT: 0, eggs: [], turrets: [], breakT: 0, waveSpawns: [], best: 0, overT: 0,
   init() {
     try { this.best = Number(localStorage.getItem('rissalarm-best')) || 0; } catch (e) { this.best = 0; }
   },
@@ -1518,13 +1655,28 @@ const Game = {
     for (const o of [...this.bolts, ...this.orbs]) scene.remove(o.mesh);
     for (const h of this.hearts) h.remove();
     for (const p of this.powerups) p.remove();
+    for (const e of this.eggs) e.remove();
+    for (const t of this.turrets) t.remove();
+    this.eggs = []; this.turrets = [];
     this.powerups = []; this.slowT = 0; Player.power = { triple: 0, rapid: 0, slow: 0 };
     this.enemies = []; this.breaches = []; this.bolts = []; this.orbs = []; this.hearts = []; this.waveSpawns = [];
     Player.hp = Player.maxHp; Player.score = 0; Player.combo = 0; this.wave = 0; HUD.dirty = true;
     Corruption.reset();
   },
+  deployTurret() {
+    const tops = furnitureTops().filter((p) => p.center.distanceTo(Player.head) < 3.5);
+    let pos;
+    if (tops.length) { tops.sort((a, b) => a.center.distanceTo(Player.head) - b.center.distanceTo(Player.head)); pos = randomPointOn(tops[0], 0.5); }
+    else { const f = Player.fwd.clone().setY(0).normalize(); pos = clampToRoom(Player.head, Player.head.clone().addScaledVector(f, 1.0), 0.3); pos.y = Room.floorY; }
+    this.turrets.push(new Turret(pos));
+  },
+  fireFrom(pos, dir) {
+    const mesh = new THREE.Mesh(boltGeo, turretBoltMat); mesh.position.copy(pos); mesh.lookAt(pos.clone().add(dir)); scene.add(mesh);
+    this.bolts.push({ pos: pos.clone(), vel: dir.clone().multiplyScalar(12), mesh, life: 1.2, bounces: 2, turret: true });
+    muzzleFlash(pos, dir); Sound.tone('square', 1400, 300, 0.06, 0.06, pos);
+  },
   start() {
-    this.reset(); this.state = 'play'; Banner.hide(); Music.start();
+    this.reset(); this.state = 'play'; Scan.start(); Banner.hide(); Music.start();
     this.nextWave();
   },
   nextWave() {
@@ -1548,6 +1700,11 @@ const Game = {
         }
         if (w === 2 && !q.includes('drone')) q[q.length - 1] = 'drone';
         this.waveSpawns.push({ delay: 1.5 + i * 3.5, queue: q });
+      }
+      const tops = furnitureTops();
+      if (w >= 2 && tops.length) {
+        const ne = Math.min(4, 1 + Math.floor(w / 2));
+        for (let i = 0; i < ne; i++) this.waveSpawns.push({ delay: 3 + i * 4, egg: true });
       }
       if (w >= 6 && Room.ceilPlane) {
         const q = []; for (let k = 0; k < 2 + Math.floor(w / 3); k++) q.push(Math.random() < 0.6 ? 'drone' : 'crawler');
@@ -1608,6 +1765,12 @@ const Game = {
         if (s.done) continue;
         s.delay -= dt;
         if (s.delay <= 0) {
+          if (s.egg) {
+            s.done = true;
+            const tops = furnitureTops().filter((p) => visibleFromHead(p.center.clone().add(new V3(0, 0.08, 0)), null));
+            if (tops.length) { const p = pick(tops); this.eggs.push(new Egg(randomPointOn(p), p)); }
+            continue;
+          }
           const spot = s.ceiling ? randomCeilingPoint() : randomWallPoint(s.boss ? 1.6 : 1.0);
           if (!spot) { s.delay = 0.5; s.tries = (s.tries || 0) + 1; if (s.tries > 12 && !s.boss) s.done = true; continue; }
           s.done = true;
@@ -1628,6 +1791,11 @@ const Game = {
     this.updateBolts(rdt);
     this.updateOrbs(dt);
     for (const p of this.powerups) p.update(rdt);
+    for (const e of this.eggs) e.update(dt);
+    this.eggs = this.eggs.filter((e) => !e.dead);
+    for (const t of this.turrets) t.update(dt);
+    this.turrets = this.turrets.filter((t) => !t.dead);
+    Scan.update(rdt);
     this.powerups = this.powerups.filter((p) => !p.dead);
     this.enemies = this.enemies.filter((e) => !e.dead);
     for (const h of this.hearts) h.update(dt);
@@ -1637,7 +1805,7 @@ const Game = {
     Player.invuln -= dt;
 
     if (this.state === 'play') {
-      const pending = this.waveSpawns.some((s) => !s.done) || this.breaches.some((b) => b.queue.length && !b.closing) || this.enemies.length;
+      const pending = this.waveSpawns.some((s) => !s.done) || this.breaches.some((b) => b.queue.length && !b.closing) || this.enemies.length || this.eggs.length;
       if (!pending && !this.breakT) {
         this.breakT = 4;
         const bonus = 250 * this.wave;
@@ -1678,6 +1846,7 @@ const Game = {
         }
         const t = segSphere(a, end, e.pos, e.r + 0.02); if (t >= 0 && t < bestT) { bestT = t; best = { type: 'enemy', e }; }
       }
+      for (const egg of this.eggs) { const t = segSphere(a, end, egg.center, 0.08); if (t >= 0 && t < bestT) { bestT = t; best = { type: 'egg', egg }; } }
       for (const pu of this.powerups) { const t = segSphere(a, end, pu.group.position, 0.12); if (t >= 0 && t < bestT) { bestT = t; best = { type: 'power', pu }; } }
       for (const o of this.orbs) { if (o.mine) continue; const t = segSphere(a, end, o.pos, 0.06); if (t >= 0 && t < bestT) { bestT = t; best = { type: 'orb', o }; } }
       const ph = raycastPlanes(a, end);
@@ -1697,6 +1866,7 @@ const Game = {
         else if (best.type === 'shard') best.e.hitShard(best.s, p);
         else if (best.type === 'orb') { this.killOrb(best.o); Player.addScore(25, p); }
         else if (best.type === 'power') best.pu.collect();
+        else if (best.type === 'egg') best.egg.hit(p);
         kill = true;
       } else {
         b.pos.copy(end);
@@ -1757,6 +1927,7 @@ const Game = {
 };
 const boltMatB1 = new THREE.MeshBasicMaterial({ color: 0xffe14f });
 const boltMatB2 = new THREE.MeshBasicMaterial({ color: 0xff7a3f });
+const turretBoltMat = new THREE.MeshBasicMaterial({ color: 0x7dff6a });
 
 // ---------------------------------------------------------------- Hauptschleife
 const clock = new THREE.Clock();
@@ -1825,4 +1996,4 @@ renderer.setAnimationLoop(loop);
 setup();
 
 // Für automatisierte Tests
-window.__game = { Game, Player, Room, Hands, THREE, Corruption, PowerUp, Music };
+window.__game = { Game, Player, Room, Hands, THREE, Corruption, PowerUp, Music, Egg, Turret, Scan };
