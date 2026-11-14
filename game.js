@@ -469,7 +469,7 @@ function randomSurfacePoint() {
 // ---------------------------------------------------------------- Spieler
 const Player = {
   head: new V3(0, 1.6, 0), fwd: new V3(0, 0, -1), quat: new THREE.Quaternion(),
-  hp: 5, maxHp: 5, score: 0, combo: 0, comboT: 0, invuln: 0,
+  hp: 5, maxHp: 5, score: 0, combo: 0, comboT: 0, invuln: 0, power: { triple: 0, rapid: 0, slow: 0 },
   hurt(n = 1) {
     if (this.invuln > 0 || Game.state !== 'play') return;
     this.hp -= n; this.invuln = 0.8; this.combo = 0;
@@ -489,7 +489,7 @@ const Vignette = (() => {
   const mat = new THREE.MeshBasicMaterial({ color: 0xff0033, transparent: true, opacity: 0, side: THREE.BackSide, depthTest: false, depthWrite: false });
   const m = new THREE.Mesh(G.sphere, mat); m.scale.setScalar(0.25); m.renderOrder = 100; scene.add(m);
   let t = 0;
-  return { hit() { t = 1; }, update(dt) { t = Math.max(0, t - dt * 2.2); mat.opacity = t * 0.45; m.visible = t > 0; m.position.copy(Player.head); } };
+  return { hit() { t = 1; mat.color.set(0xff0033); }, tint(c) { t = 0.8; mat.color.set(c); }, update(dt) { t = Math.max(0, t - dt * 2.2); if (Game.slowT > 0 && t < 0.25) { t = 0.25; mat.color.set(0x6a3cff); } mat.opacity = t * 0.45; m.visible = t > 0; m.position.copy(Player.head); } };
 })();
 
 // ---------------------------------------------------------------- Hände / Controller
@@ -635,7 +635,7 @@ const Hands = {
         if (h.firing && Game.state === 'play' && u.overheat <= 0) {
           h.fireT -= dt;
           if (h.fireT <= 0) {
-            Game.fire(h); h.fireT = 0.15; u.kick = 1; u.heat += 0.085;
+            Game.fire(h); const rapid = Player.power.rapid > 0; h.fireT = rapid ? 0.075 : 0.15; u.kick = 1; u.heat += rapid ? 0.02 : 0.085;
             if (u.heat >= 1) { u.overheat = 1.4; Sound.overheat(h.pos); Hands.buzz(h, 0.8, 250); popup(h.pos.clone().add(new V3(0, 0.1, 0)), 'ÜBERHITZT', '#ff3355', 0.035); }
           }
         }
@@ -694,6 +694,9 @@ const HUD = (() => {
         g.fillStyle = i < Player.hp ? '#ff2a6a' : 'rgba(255,255,255,0.15)';
         heart(g, 40 + i * 52, 160, 18);
       }
+      g.textAlign = 'right'; g.font = '800 26px system-ui,sans-serif'; let py = 70;
+      for (const k in POWER) if (Player.power[k] > 0) { g.fillStyle = POWER[k].css; g.fillText(`${POWER[k].label} ${Math.ceil(Player.power[k])}`, 488, py); py += 32; }
+      g.textAlign = 'left';
       tex.needsUpdate = true; H.dirty = false;
     },
   };
@@ -854,13 +857,16 @@ class Enemy {
     if (bolt && bolt.bounces > 0) { base *= 1 + bolt.bounces; extra = ` BANDE x${1 + bolt.bounces}`; }
     if (bolt && bolt.reflected) { base *= 2; extra = ' KONTER'; }
     if (bolt && bolt.melee) { base *= 2; extra = ' SCHLAG'; }
+    const isBoss = this instanceof Boss;
+    const chance = isBoss ? 1 : this.brute ? 0.45 : this instanceof Drone ? 0.18 : 0.09;
+    if (Math.random() < chance) for (let i = 0; i < (isBoss ? 2 : 1); i++) Game.powerups.push(new PowerUp(this.pos.clone().add(new V3(rand(-0.2, 0.2), 0.1, rand(-0.2, 0.2))), pick(Object.keys(POWER))));
     Player.addScore(base, this.pos.clone().add(new V3(0, this.r + 0.08, 0)), extra);
     Particles.burst(this.pos, this.color, 30, 2.2, 0.03 * (this.r / 0.08));
     flash(this.pos, this.color, this.r * 5, 0.3);
     Sound.explode(this.pos, this.r > 0.2);
     this.remove();
   }
-  remove() { this.dead = true; scene.remove(this.group); if (this.shadow) scene.remove(this.shadow); }
+  remove() { this.dead = true; scene.remove(this.group); if (this.shadow) scene.remove(this.shadow); if (this.bar) scene.remove(this.bar); }
   flashMat(mesh, normal) { mesh.material = this.hitFlash > 0 ? M.crawlerHot : normal; }
 }
 
@@ -979,6 +985,13 @@ class Boss extends Enemy {
     this.halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xff3fb4, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.7 }));
     this.halo.scale.setScalar(1.3);
     this.group.add(this.core, this.halo);
+    this.maxHp = this.hp;
+    this.bar = new THREE.Group();
+    const bg = new THREE.Mesh(G.plane, new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.55, depthWrite: false }));
+    bg.scale.set(0.62, 0.05, 1);
+    this.fill = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).translate(0.5, 0, 0), new THREE.MeshBasicMaterial({ color: 0xff3fb4 }));
+    this.fill.scale.set(0.6, 0.035, 1); this.fill.position.set(-0.3, 0, 0.001);
+    this.bar.add(bg, this.fill); scene.add(this.bar);
     this.shards = [];
     this.makeShards();
     this.shootT = 2.5; this.spawnT = 6; this.regenT = 0; this.phaseA = 0;
@@ -1023,6 +1036,9 @@ class Boss extends Enemy {
     this.t += dt; this.hitFlash -= dt; this.phaseA += dt;
     this.core.material = this.hitFlash > 0 ? M.crawlerHot : M.boss;
     this.group.scale.setScalar(Math.min(1, 0.1 + this.t * 0.4));
+    this.bar.position.copy(this.pos).add(new V3(0, 0.75 * this.group.scale.x, 0)); this.bar.lookAt(Player.head);
+    this.fill.scale.x = 0.6 * Math.max(0, this.hp / this.maxHp);
+    this.fill.material.color.set(this.shards.length ? 0x8ffcff : (Math.floor(this.t * 6) % 2 ? 0xff3fb4 : 0xffffff));
     const sway = new V3(Math.sin(this.phaseA * 0.6) * 0.6, Math.sin(this.phaseA * 1.1) * 0.15, 0);
     const right = new V3().subVectors(this.home, Player.head).setY(0).normalize(); right.set(-right.z, 0, right.x);
     const goal = this.t < 2.5 ? this.breach.pos.clone().addScaledVector(this.breach.normal, 0.5) : this.home.clone().addScaledVector(right, sway.x).add(new V3(0, sway.y, 0));
@@ -1321,11 +1337,157 @@ const _rotX90 = new THREE.Matrix4().makeRotationX(Math.PI / 2);
 const _tmpM = new THREE.Matrix4();
 Corruption.init();
 
+// ---------------------------------------------------------------- Prozedurale Musik
+const Music = {
+  on: false, step: 0, next: 0, timer: null, out: null,
+  start() {
+    if (!Sound.ctx || this.on) return;
+    this.on = true; this.step = 0; this.next = Sound.ctx.currentTime + 0.15;
+    this.out = Sound.ctx.createGain(); this.out.gain.value = 0.0; this.out.gain.setTargetAtTime(0.2, Sound.ctx.currentTime, 0.8); this.out.connect(Sound.master);
+    this.timer = setInterval(() => this.tick(), 25);
+  },
+  stop() {
+    if (!this.on) return; this.on = false; clearInterval(this.timer);
+    const o = this.out; o.gain.setTargetAtTime(0, Sound.ctx.currentTime, 0.4); setTimeout(() => o.disconnect(), 2500);
+  },
+  v(type, f0, f1, t, dur, vol, cut = 0) {
+    const c = Sound.ctx; const o = c.createOscillator(), g = c.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t); if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + 0.005); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    let node = o;
+    if (cut) { const f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = cut; f.Q.value = 6; o.connect(f); node = f; }
+    node.connect(g); g.connect(this.out); o.start(t); o.stop(t + dur + 0.05);
+  },
+  n(t, dur, vol, hp) {
+    const c = Sound.ctx; const s = c.createBufferSource(); s.buffer = Sound.noise;
+    const f = c.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = hp;
+    const g = c.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(g); g.connect(this.out); s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.02);
+  },
+  tick() {
+    const c = Sound.ctx; if (!c) return;
+    const bpm = Math.min(140, 104 + Game.wave * 3);
+    const spb = 60 / bpm / 4 * (Game.slowT > 0 ? 1.8 : 1);
+    while (this.next < c.currentTime + 0.12) { this.play(this.step, this.next, spb); this.next += spb; this.step = (this.step + 1) % 64; }
+  },
+  play(s, t, spb) {
+    const I = Game.intensity();
+    const boss = Game.enemies.some((e) => e instanceof Boss);
+    const mf = (m) => 440 * Math.pow(2, (m - 69) / 12);
+    const root = (boss ? [40, 40, 41, 39] : [45, 41, 43, 40])[Math.floor(s / 16)];
+    if (s % 4 === 0) this.v('sine', 150, 42, t, 0.28, 0.9);
+    if (I > 0.25 && s % 8 === 4) { this.n(t, 0.16, 0.35, 1200); this.v('triangle', 220, 120, t, 0.08, 0.25); }
+    if (I > 0.1 && s % 2 === 1) this.n(t, 0.04, s % 4 === 3 ? 0.18 : 0.09, 7000);
+    if (s % 2 === 0) this.v('sawtooth', mf(root + [0, 0, 12, 0, 7, 0, 12, 10][(s / 2) % 8]), mf(root + [0, 0, 12, 0, 7, 0, 12, 10][(s / 2) % 8]), t, spb * 1.7, 0.22, 300 + I * 1500);
+    if (I > 0.45) { const m = root + 24 + [0, 3, 7, 10, 12, 10, 7, 3][s % 8]; this.v('square', mf(m), mf(m), t, spb * 0.9, 0.035 + I * 0.03, 2500); }
+    if (s % 16 === 0 && (boss || I > 0.7)) { for (const d of [0, 3, 7]) { this.v('sawtooth', mf(root + 12 + d) * 1.003, mf(root + 12 + d), t, spb * 15, 0.05, 1200); } }
+  },
+};
+
+// ---------------------------------------------------------------- Power-ups
+const POWER = {
+  triple: { color: 0xffe14f, css: '#ffe14f', label: 'DREIFACHSCHUSS', dur: 12 },
+  rapid: { color: 0xff7a3f, css: '#ff7a3f', label: 'SCHNELLFEUER', dur: 10 },
+  slow: { color: 0xb18cff, css: '#b18cff', label: 'ZEITLUPE', dur: 6 },
+};
+class PowerUp {
+  constructor(pos, type) {
+    this.type = type; this.pos = pos.clone(); this.pos.y = Math.max(this.pos.y, Room.floorY + 0.5); this.t = 0; this.life = 12; this.dead = false;
+    const P = POWER[type];
+    this.group = new THREE.Group(); this.group.position.copy(this.pos);
+    this.shell = new THREE.Mesh(new THREE.IcosahedronGeometry(0.07, 0), new THREE.MeshPhongMaterial({ color: P.color, emissive: P.color, emissiveIntensity: 0.5, transparent: true, opacity: 0.55, flatShading: true, shininess: 200 }));
+    this.wire = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(0.075, 0)), new THREE.LineBasicMaterial({ color: 0xffffff }));
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: P.color, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true })); glow.scale.setScalar(0.35);
+    const tex = textTexture(P.label, P.css, 48);
+    this.label = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false })); this.label.scale.set(0.04 * tex.userData.aspect, 0.04, 1); this.label.position.y = 0.13;
+    this.group.add(this.shell, this.wire, glow, this.label);
+    scene.add(this.group);
+    Sound.tone('triangle', 660, 1320, 0.25, 0.15, this.pos);
+  }
+  update(dt) {
+    this.t += dt; this.life -= dt;
+    this.group.position.set(this.pos.x, this.pos.y + Math.sin(this.t * 2.2) * 0.04, this.pos.z);
+    this.shell.rotation.x += dt * 1.3; this.shell.rotation.y += dt * 1.9; this.wire.rotation.copy(this.shell.rotation);
+    this.group.visible = this.life > 3 || Math.floor(this.life * 8) % 2 === 0;
+    if (this.life <= 0) this.remove();
+    if (Hands.list.some((h) => h.src && h.pos.distanceTo(this.group.position) < 0.15)) this.collect();
+  }
+  collect() {
+    if (this.dead) return;
+    const P = POWER[this.type];
+    Player.power[this.type] = P.dur; HUD.dirty = true;
+    popup(this.group.position.clone(), P.label + '!', P.css, 0.07);
+    Particles.burst(this.group.position, P.color, 30, 2, 0.02);
+    [880, 1175, 1568].forEach((f, i) => Sound.tone('square', f, f, 0.1, 0.12, null, i * 0.05));
+    Hands.buzzAll(0.7, 120);
+    if (this.type === 'slow') { Sound.tone('sine', 400, 80, 1.0, 0.3); Vignette.tint(0x6a3cff); }
+    this.remove();
+  }
+  remove() { this.dead = true; scene.remove(this.group); }
+}
+
+// ---------------------------------------------------------------- Richtungspfeile zu Gefahren außerhalb des Blicks
+const Arrows = (() => {
+  const geo = new THREE.ConeGeometry(0.018, 0.05, 3);
+  const pool = Array.from({ length: 5 }, () => {
+    const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xff3fb4, transparent: true, depthTest: false, depthWrite: false }));
+    m.renderOrder = 30; m.visible = false; scene.add(m); return m;
+  });
+  const Y = new V3(0, 1, 0), dir = new V3(), perp = new V3();
+  let t = 0;
+  return {
+    update(dt) {
+      t += dt;
+      const threats = [];
+      if (Game.state === 'play') {
+        for (const b of Game.breaches) if (!b.closing) threats.push(b.pos);
+        for (const e of Game.enemies) if (e instanceof Boss) threats.push(e.pos);
+      }
+      let k = 0;
+      for (const p of threats) {
+        if (k >= pool.length) break;
+        dir.copy(p).sub(Player.head).normalize();
+        if (dir.dot(Player.fwd) > 0.75) continue;
+        perp.copy(dir).addScaledVector(Player.fwd, -dir.dot(Player.fwd));
+        if (perp.lengthSq() < 1e-4) perp.set(0, -1, 0);
+        perp.normalize();
+        const m = pool[k++];
+        m.visible = true;
+        m.position.copy(Player.head).addScaledVector(Player.fwd, 0.6).addScaledVector(perp, 0.2 + 0.015 * Math.sin(t * 8));
+        m.quaternion.setFromUnitVectors(Y, perp);
+        m.material.opacity = 0.6 + 0.4 * Math.sin(t * 8);
+      }
+      for (; k < pool.length; k++) pool[k].visible = false;
+    },
+  };
+})();
+
+// ---------------------------------------------------------------- Einschussspuren
+const scorchTex = canvasTex(64, 64, (g) => {
+  const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(10,5,20,0.85)'); gr.addColorStop(0.45, 'rgba(30,10,40,0.6)'); gr.addColorStop(0.7, 'rgba(56,243,255,0.35)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+});
+const scorches = [];
+function scorch(point, normal) {
+  const mat = new THREE.MeshBasicMaterial({ map: scorchTex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 }); mat.userData.own = true;
+  const m = new THREE.Mesh(G.plane, mat);
+  m.position.copy(point).addScaledVector(normal, 0.003); m.lookAt(m.position.clone().add(normal)); m.rotation.z = rand(0, 6);
+  const sz = rand(0.05, 0.09); m.scale.setScalar(sz);
+  addFx(m, 9, (o, k) => { o.material.opacity = k < 0.75 ? 1 : 1 - (k - 0.75) / 0.25; });
+  scorches.push(m);
+  if (scorches.length > 40) { const o = scorches.shift(); o.material.opacity = 0; }
+}
+
 // ---------------------------------------------------------------- Spiel
 const Game = {
-  state: 'idle', wave: 0, breaches: [], enemies: [], bolts: [], orbs: [], hearts: [], breakT: 0, waveSpawns: [], best: 0, overT: 0,
+  state: 'idle', wave: 0, breaches: [], enemies: [], bolts: [], orbs: [], hearts: [], powerups: [], slowT: 0, breakT: 0, waveSpawns: [], best: 0, overT: 0,
   init() {
     try { this.best = Number(localStorage.getItem('rissalarm-best')) || 0; } catch (e) { this.best = 0; }
+  },
+  intensity() {
+    const boss = this.enemies.some((e) => e instanceof Boss);
+    return clamp(0.15 + Corruption.level * 0.5 + this.enemies.length * 0.05 + (boss ? 0.4 : 0), 0, 1);
   },
   intro() {
     this.state = 'intro';
@@ -1336,12 +1498,14 @@ const Game = {
     for (const b of this.breaches) b.remove();
     for (const o of [...this.bolts, ...this.orbs]) scene.remove(o.mesh);
     for (const h of this.hearts) h.remove();
+    for (const p of this.powerups) p.remove();
+    this.powerups = []; this.slowT = 0; Player.power = { triple: 0, rapid: 0, slow: 0 };
     this.enemies = []; this.breaches = []; this.bolts = []; this.orbs = []; this.hearts = []; this.waveSpawns = [];
     Player.hp = Player.maxHp; Player.score = 0; Player.combo = 0; this.wave = 0; HUD.dirty = true;
     Corruption.reset();
   },
   start() {
-    this.reset(); this.state = 'play'; Banner.hide();
+    this.reset(); this.state = 'play'; Banner.hide(); Music.start();
     this.nextWave();
   },
   nextWave() {
@@ -1388,10 +1552,14 @@ const Game = {
   },
   fire(h) {
     const pos = h.pos.clone().addScaledVector(h.dir, 0.16);
-    const mesh = new THREE.Mesh(boltGeo, boltMat); mesh.position.copy(pos); mesh.lookAt(pos.clone().add(h.dir)); scene.add(mesh);
-    const trail = new THREE.Mesh(trailGeo, trailMat); mesh.add(trail);
     muzzleFlash(pos, h.dir);
-    this.bolts.push({ pos, vel: h.dir.clone().multiplyScalar(14), mesh, life: 1.6, bounces: 0 });
+    const up = new V3(0, 1, 0).transformDirection(h.c.matrixWorld);
+    const dirs = Player.power.triple > 0 ? [-0.1, 0, 0.1].map((a) => h.dir.clone().applyAxisAngle(up, a)) : [h.dir];
+    for (const d of dirs) {
+      const mesh = new THREE.Mesh(boltGeo, Player.power.triple > 0 ? boltMatB1 : boltMat); mesh.position.copy(pos); mesh.lookAt(pos.clone().add(d)); scene.add(mesh);
+      const trail = new THREE.Mesh(trailGeo, trailMat); mesh.add(trail);
+      this.bolts.push({ pos: pos.clone(), vel: d.clone().multiplyScalar(14), mesh, life: 1.6, bounces: 0 });
+    }
     Sound.shoot(pos); Hands.buzz(h, 0.35, 30);
   },
   enemyShot(from, to, speed = 1.7) {
@@ -1405,11 +1573,16 @@ const Game = {
     this.state = 'over'; this.overT = 2;
     const rec = Player.score > this.best;
     if (rec) { this.best = Player.score; try { localStorage.setItem('rissalarm-best', String(this.best)); } catch (e) { /* egal */ } }
-    Sound.over();
+    Sound.over(); Music.stop();
     for (const b of this.breaches) b.close();
     Banner.show('GAME OVER', `${Player.score} Punkte · Welle ${this.wave}\n${rec ? 'NEUER REKORD!' : 'Rekord: ' + this.best}\nAbzug: Neustart · B/Y halten: Beenden`, '#ff3fb4', 0);
   },
-  update(dt) {
+  update(rdt) {
+    // Power-up-Timer (Echtzeit) und Zeitlupe
+    for (const k in Player.power) if (Player.power[k] > 0) { Player.power[k] = Math.max(0, Player.power[k] - rdt); if (Player.power[k] === 0) HUD.dirty = true; }
+    this.slowT = Player.power.slow;
+    const dt = this.slowT > 0 ? rdt * 0.35 : rdt;
+    if (Math.random() < rdt * 2) HUD.dirty = true;
     // Wellen-Spawns
     if (this.state === 'play') {
       for (const s of this.waveSpawns) {
@@ -1433,8 +1606,10 @@ const Game = {
     this.breaches = this.breaches.filter((b) => !b.dead);
     for (const e of this.enemies) if (!e.dead) e.update(dt);
     this.updateMelee();
-    this.updateBolts(dt);
+    this.updateBolts(rdt);
     this.updateOrbs(dt);
+    for (const p of this.powerups) p.update(rdt);
+    this.powerups = this.powerups.filter((p) => !p.dead);
     this.enemies = this.enemies.filter((e) => !e.dead);
     for (const h of this.hearts) h.update(dt);
     this.hearts = this.hearts.filter((h) => !h.dead);
@@ -1484,6 +1659,7 @@ const Game = {
         }
         const t = segSphere(a, end, e.pos, e.r + 0.02); if (t >= 0 && t < bestT) { bestT = t; best = { type: 'enemy', e }; }
       }
+      for (const pu of this.powerups) { const t = segSphere(a, end, pu.group.position, 0.12); if (t >= 0 && t < bestT) { bestT = t; best = { type: 'power', pu }; } }
       for (const o of this.orbs) { if (o.mine) continue; const t = segSphere(a, end, o.pos, 0.06); if (t >= 0 && t < bestT) { bestT = t; best = { type: 'orb', o }; } }
       const ph = raycastPlanes(a, end);
       if (ph && ph.t < bestT) {
@@ -1491,16 +1667,17 @@ const Game = {
         if (br) { br.damage(ph.point); kill = true; }
         else if (b.bounces < 2) {
           b.bounces++; b.vel.reflect(ph.normal); b.pos.copy(ph.point).addScaledVector(ph.normal, 0.01);
-          ripple(ph.point, ph.normal, 0x38f3ff, 0.3); Sound.bounce(ph.point);
+          ripple(ph.point, ph.normal, 0x38f3ff, 0.3); Sound.bounce(ph.point); scorch(ph.point, ph.normal);
           b.mesh.material = b.bounces === 1 ? boltMatB1 : boltMatB2;
           b.mesh.position.copy(b.pos); b.mesh.lookAt(b.pos.clone().add(b.vel));
           continue;
-        } else { Particles.burst(ph.point, 0x38f3ff, 6, 0.8, 0.01); ripple(ph.point, ph.normal, 0x38f3ff, 0.15); kill = true; }
+        } else { Particles.burst(ph.point, 0x38f3ff, 6, 0.8, 0.01); ripple(ph.point, ph.normal, 0x38f3ff, 0.15); scorch(ph.point, ph.normal); kill = true; }
       } else if (best) {
         const p = a.clone().lerp(end, bestT);
         if (best.type === 'enemy') best.e.hit(1, p, b);
         else if (best.type === 'shard') best.e.hitShard(best.s, p);
         else if (best.type === 'orb') { this.killOrb(best.o); Player.addScore(25, p); }
+        else if (best.type === 'power') best.pu.collect();
         kill = true;
       } else {
         b.pos.copy(end);
@@ -1591,6 +1768,7 @@ function loop(t, frame) {
   Hands.update(dt);
   Game.update(dt);
   Corruption.update(dt);
+  Arrows.update(dt);
   Particles.update(dt);
   updateFx(dt);
   Vignette.update(dt);
@@ -1616,7 +1794,7 @@ async function setup() {
         requiredFeatures: ['local-floor'],
         optionalFeatures: ['plane-detection', 'hand-tracking'],
       });
-      session.addEventListener('end', () => { document.getElementById('ui').style.display = 'flex'; Game.reset(); Game.state = 'idle'; Banner.hide(); clearFallback(); Room.haveReal = false; sessionTime = 0; });
+      session.addEventListener('end', () => { Music.stop(); document.getElementById('ui').style.display = 'flex'; Game.reset(); Game.state = 'idle'; Banner.hide(); clearFallback(); Room.haveReal = false; sessionTime = 0; });
       await renderer.xr.setSession(session);
       document.getElementById('ui').style.display = 'none';
       sessionTime = 0;
@@ -1628,4 +1806,4 @@ renderer.setAnimationLoop(loop);
 setup();
 
 // Für automatisierte Tests
-window.__game = { Game, Player, Room, Hands, THREE, Corruption };
+window.__game = { Game, Player, Room, Hands, THREE, Corruption, PowerUp, Music };
