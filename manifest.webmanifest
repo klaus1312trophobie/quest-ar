@@ -1,0 +1,14 @@
+{
+  "name": "Riss-Alarm",
+  "short_name": "Riss-Alarm",
+  "description": "Mixed-Reality-Spiel für Meta Quest: Kristallwesen brechen durch deine echten Wände.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0b0618",
+  "theme_color": "#0b0618",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
