@@ -42,7 +42,7 @@ const Sound = {
     if (this.ctx) return;
     try {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-      this.master = this.ctx.createGain(); this.master.gain.value = 0.8; this.master.connect(this.ctx.destination);
+      this.master = this.ctx.createGain(); this.master.gain.value = new URLSearchParams(location.search).has('mute') ? 0 : 0.8; this.master.connect(this.ctx.destination);
       this.musicGain = this.ctx.createGain(); this.musicGain.gain.value = 0.07; this.musicGain.connect(this.master);
       const len = this.ctx.sampleRate * 2;
       this.noise = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
@@ -209,7 +209,7 @@ function addFx(obj, life, update) { scene.add(obj); Fx.push({ obj, life, max: li
 function updateFx(dt) {
   for (let i = Fx.length - 1; i >= 0; i--) {
     const f = Fx[i]; f.life -= dt;
-    if (f.life <= 0) { scene.remove(f.obj); f.obj.material?.dispose?.(); Fx.splice(i, 1); continue; }
+    if (f.life <= 0) { scene.remove(f.obj); f.obj.material?.dispose?.(); if (!f.obj.isSprite) f.obj.traverse((c) => c.geometry?.dispose()); Fx.splice(i, 1); continue; }
     f.update(f.obj, 1 - f.life / f.max, dt);
   }
 }
@@ -1520,14 +1520,16 @@ const rollGeo = (() => {
   g.rotateX(-Math.PI / 2); g.translate(0, 0.003, 0); return g;
 })();
 const coreGeo = new THREE.CylinderGeometry(0.0205, 0.0205, 0.118, 16, 1, true).translate(0, 0.06, 0);
+// Rolle + Papphülse in einem Netz (ein Draw-Call pro Rolle statt zwei)
+const rollOneGeo = mergeGeos([[rollGeo, 0xffffff], [coreGeo, 0xb08a5a]]);
+const rollMat = MAT.paper.clone(); rollMat.vertexColors = true;
 const ghostMatOk = new THREE.MeshBasicMaterial({ color: 0x7dff6a, transparent: true, opacity: 0.35, depthWrite: false });
 const ghostMatBad = new THREE.MeshBasicMaterial({ color: 0xff3b3b, transparent: true, opacity: 0.35, depthWrite: false });
 const Rolls = {
   list: [],
   add(x, z, y) {
     const g = new THREE.Group(); g.position.set(x, y, z);
-    const m = new THREE.Mesh(rollGeo, MAT.paper); g.add(m);
-    const core = new THREE.Mesh(coreGeo, MAT.cardboard); g.add(core);
+    g.add(new THREE.Mesh(rollOneGeo, rollMat));
     g.rotation.y = Math.random() * 6; g.scale.setScalar(0.01);
     addObj(g);
     const s = makeSolid('roll', rectPoly(x, z, CELL / 2, CELL / 2), y + CELL, y);
@@ -1665,7 +1667,7 @@ const Robot = {
     World.dyn = solidsBackup;
     let offFloor = Room.floorPoly && !pip(nx + Math.sin(this.dir) * this.R, nz + Math.cos(this.dir) * this.R, Room.floorPoly);
     // Günthers Startplatz ist tabu (kein Lauern am Wiedereinstieg)
-    if (!Level.lava) { const d1 = Math.hypot(nx - Level.spawn.x, nz - Level.spawn.z); if (d1 < this.R + 0.25 && d1 < Math.hypot(this.pos.x - Level.spawn.x, this.pos.z - Level.spawn.z)) offFloor = true; }
+    if (!Level.lava) for (const sp of [Level.spawn, Guenther.check]) { const d1 = Math.hypot(nx - sp.x, nz - sp.z); if (d1 < this.R + 0.25 && d1 < Math.hypot(this.pos.x - sp.x, this.pos.z - sp.z)) offFloor = true; }
     if (hit || offFloor || this.turnT < -rand(4, 9)) { this.dir += (Math.random() < 0.5 ? 1 : -1) * rand(1.6, 2.8); this.turnT = 0; this.vel.set(0, 0, 0); }
     else { this.vel.set((nx - this.pos.x) / dt, 0, (nz - this.pos.z) / dt); this.pos.x = nx; this.pos.z = nz; }
     this.obj.position.copy(this.pos);
@@ -1978,7 +1980,8 @@ const HUD = (() => {
       drop(g, 40, 92, 22, warn && Math.floor(performance.now() / 250) % 2 ? '#ff4040' : '#ffe14f');
       g.fillStyle = 'rgba(255,255,255,0.15)'; g.fillRect(74, 76, 410, 34);
       g.fillStyle = warn ? '#ff7a2e' : '#ffe14f'; g.fillRect(74, 76, 410 * b, 34);
-      g.fillStyle = '#1a1206'; g.font = '900 24px system-ui,sans-serif'; g.fillText(`BLASE ${Math.round(b * 100)} %`, 84, 81);
+      g.font = '900 24px system-ui,sans-serif'; g.lineWidth = 5; g.lineJoin = 'round'; g.strokeStyle = '#1a1206';
+      g.strokeText(`BLASE ${Math.round(b * 100)} %`, 84, 81); g.fillStyle = '#fff'; g.fillText(`BLASE ${Math.round(b * 100)} %`, 84, 81);
       g.font = '800 30px system-ui,sans-serif'; g.fillStyle = '#fff';
       g.fillText(`🍺 ${Game.beers}/${Level.need || Level.beers.length}${Level.need ? ' Pfand' : ''}`, 22, 126);
       g.fillStyle = '#ffd23f'; g.font = '900 34px system-ui,sans-serif'; g.textAlign = 'right'; g.fillText(`${Game.score + Game.levelScore()}`, 490, 124); g.textAlign = 'left';
@@ -2088,7 +2091,7 @@ const ITEM_DEF = {
 };
 const DILDO_V = Math.sqrt(2 * GRAV * 0.4), DILDO_BOOST = 2.2, DRYER_LIFT = 0.52, DRYER_R = 0.075;
 const ITEM_MESH = {
-  roll() { const g = new THREE.Group(); g.add(new THREE.Mesh(rollGeo, MAT.paper), new THREE.Mesh(coreGeo, MAT.cardboard)); return g; },
+  roll() { const g = new THREE.Group(); g.add(new THREE.Mesh(rollOneGeo, rollMat)); return g; },
   cushion() { const g = new THREE.Group(); const m = new THREE.Mesh(cushionGeo, MAT.cushion); m.position.y = 0.012; g.add(m); return g; },
   dildo() {
     const g = new THREE.Group();
@@ -2122,6 +2125,8 @@ Object.defineProperty(Level, 'cushions', { get() { return this.inv.cushion; }, s
 const Items = {
   list: [], bodies: [], held: null,
   clear() { this.list = []; this.bodies = []; this.held = null; },
+  // Gehaltenes Teil wegpacken (Sieg, Niederlage): zurück in den Vorrat
+  stow() { const h = this.held; if (!h) return; this.held = null; scene.remove(h.g); Level.objs.splice(Level.objs.indexOf(h.g), 1); Level.inv[h.kind]++; },
   // Ist der Platz frei? (Punkte im Grundriss, Höhenbereich)
   free(pts, y0, y1) {
     const gp = Guenther.pos;
@@ -2387,7 +2392,8 @@ function furnTops(minH, maxH) {
     && Math.hypot((s.min[0] + s.max[0]) / 2 - o.x, (s.min[1] + s.max[1]) / 2 - o.z) < 4);
 }
 function clearLevel() {
-  for (const o of Level.objs) scene.remove(o);
+  // Geometrien freigeben (pro Level neu gebaute sonst ein Leck; geteilte lädt three.js bei Bedarf einfach neu hoch)
+  for (const o of Level.objs) { scene.remove(o); o.traverse((c) => c.geometry?.dispose()); }
   Level.objs = []; Level.beers = []; Level.avoid = []; Level.toilet = null;
   World.dyn = []; Rolls.clear(); Cushions.clear(); Items.clear(); Robot.clear(); Lava.clear();
 }
@@ -2589,6 +2595,7 @@ const Game = {
     }
   },
   win() {
+    Items.stow();
     this.state = 'pee'; this.peeT = 0; this.flushed = false;
     const G = Guenther, T = Level.toilet;
     G.frozen = true; G.target = null; G.pos.copy(T.pos).add(new V3(Math.sin(T.g.rotation.y), 0, Math.cos(T.g.rotation.y)).multiplyScalar(0.05));
@@ -2606,6 +2613,7 @@ const Game = {
     Banner.show('ERLEICHTERT!', `${'🧻'.repeat(rating)}${'·'.repeat(3 - rating)}  ${verdict}\nDosenpfand ${this.beers}×100 · Rest-Rollen +${rollBonus} · Kissen +${cushionBonus} · Blase +${bladderBonus}${this.bonus ? ' · Randale +' + this.bonus : ''}\nGesamt ${this.score} · Rekord ${this.best}\n${DESK.on ? 'Enter: nächstes Level · N: nochmal' : 'A: nächstes Level · X: nochmal'}`, '#7dff6a', 0);
   },
   fail() {
+    Items.stow();
     this.state = 'fail'; Music.stop(); Sound.fail();
     Guenther.frozen = true; Guenther.say('fail', true);
     const p = Guenther.pos.clone();
@@ -2827,6 +2835,9 @@ async function setup() {
       Err.crumb('session ' + AR.features.join(',') + ' depthUsage=' + session.depthUsage + ' fmt=' + session.depthDataFormat);
       session.addEventListener('end', () => {
         Err.crumb('session end, frames=' + Err.frames);
+        for (const h of Hands.list) h.prev.length = 0;
+        for (const k of ['trigT', 'cyc', 'rsT', 'exitT', 'aim']) if (k in Input) Input[k] = k === 'aim' ? null : 0;
+        boxT = 0;
         Game.exit(); Setup.captureUsed = false; document.getElementById('ui').style.display = 'flex';
         Room.planes = []; Room.map.clear(); Room.boxes = []; Room.boxKey = ''; Room.haveReal = false; Room.fallback = false; Room.dirty = true; sessionTime = 0;
       });
