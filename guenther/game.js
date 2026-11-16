@@ -1,6 +1,6 @@
 // Günther muss mal – WebXR Mixed-Reality-Jump-and-Run für Meta Quest (Quest-Browser)
 // Das echte Zimmer ist das Level: Boden, Möbel und Wände aus der Raumeinrichtung der Quest.
-import * as THREE from '../vendor/three.module.js';
+import * as THREE from './vendor/three.module.js';
 
 const V3 = THREE.Vector3;
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -402,8 +402,8 @@ function clearFallback() {
 
 // ---------------------------------------------------------------- Welt: Festkörper (Prismen), Wände, Abfragen
 // Solid = { kind, poly:[[x,z]], min, max, top, bottom }  ·  Wall = Strecke im Grundriss mit Höhe
-const World = { solids: [], walls: [], dyn: [], group: new THREE.Group() };
-scene.add(World.group);
+const World = { solids: [], walls: [], dyn: [], group: new THREE.Group(), occ: new THREE.Group() };
+scene.add(World.group, World.occ);
 const LABEL_DE = { table: 'TISCH', couch: 'SOFA', shelf: 'REGAL', bed: 'BETT', storage: 'SCHRANK', screen: 'BILDSCHIRM', lamp: 'LAMPE', plant: 'PFLANZE', desk: 'SCHREIBTISCH', other: 'OBJEKT' };
 function makeSolid(kind, poly, top, bottom, extra = {}) {
   const b = bbox(poly);
@@ -440,44 +440,63 @@ function topGeometry(poly, y) {
   return g;
 }
 
+// Die Quest liefert die Flächen ALLER gescannten Räume. Benutzt wird nur der Raum, in dem der Spieler steht:
+// Wände müssen am Rand seines Bodens liegen, Möbel über seinem Boden. Fremde Wände mitten im Zimmer wären sonst
+// unsichtbare Hindernisse und (als Verdecker) unsichtbare Wände, die das Bild abschneiden.
+function nearFloorEdge(x, z, eps) { return closestOnPoly(x, z, Room.floorPoly, [0, 0]) < eps; }
 function rebuildWorld() {
   computeFloor();
   for (const c of [...World.group.children]) { World.group.remove(c); c.geometry?.dispose(); }
-  World.solids = []; World.walls = [];
-  const fy = Room.floorY;
-  Room.floorPoly = null;
+  for (const c of [...World.occ.children]) { World.occ.remove(c); c.geometry?.dispose(); }
+  World.solids = []; World.walls = []; Room.skipped = 0;
+  const fy = Room.floorY, fp = Room.floorPlane;
+  Room.floorPoly = fp ? fp.poly.map(([x, z]) => { const v = new V3(x, 0, z).applyMatrix4(fp.matrix); return [v.x, v.z]; }) : null;
+  if (Room.floorPoly && Room.fallback && DESK.on) World.group.add(new THREE.Mesh(topGeometry(Room.floorPoly, fy - 0.001), fakeFloorMat));
+  const strict = !!Room.floorPoly && !Room.fallback;
+  const cand = [];
   for (const p of Room.active) {
+    if (p === fp || p.label === 'floor' || p.label === 'ceiling') continue;
     const wp = p.poly.map(([x, z]) => new V3(x, 0, z).applyMatrix4(p.matrix));
     if (p.vertical) {
       // Wand: weiteste zwei Punkte im Grundriss = Strecke
       let a = wp[0], b = wp[0], best = -1;
       for (const u of wp) for (const v of wp) { const d = (u.x - v.x) ** 2 + (u.z - v.z) ** 2; if (d > best) { best = d; a = u; b = v; } }
       if (best < 0.04) continue;
+      if (strict) {
+        const near = (t) => nearFloorEdge(a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t, 0.3);
+        if (!(near(0.15) && near(0.5) && near(0.85))) { Room.skipped++; continue; }
+      }
       const y0 = Math.min(...wp.map((v) => v.y)), y1 = Math.max(...wp.map((v) => v.y));
       World.walls.push({ a: [a.x, a.z], b: [b.x, b.z], y0, y1, label: p.label, plane: p });
-      const m = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(p.poly.map(([x, z]) => new THREE.Vector2(x, z)))), Room.fallback ? fakeWallMat : occMat);
-      m.matrixAutoUpdate = false; m.matrix.copy(p.matrix).multiply(_occRot); m.renderOrder = Room.fallback ? 0 : -10;
-      World.group.add(m);
+      if (Room.fallback && DESK.on) {
+        const m = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(p.poly.map(([x, z]) => new THREE.Vector2(x, z)))), fakeWallMat);
+        m.matrixAutoUpdate = false; m.matrix.copy(p.matrix).multiply(_occRot); World.group.add(m);
+      }
       continue;
     }
-    const poly = wp.map((v) => [v.x, v.z]);
-    if (p === Room.floorPlane) {
-      Room.floorPoly = poly;
-      if (Room.fallback && DESK.on) { const m = new THREE.Mesh(topGeometry(poly, fy - 0.001), fakeFloorMat); m.receiveShadow = false; World.group.add(m); }
-      continue;
-    }
-    if (p.label === 'floor' || p.label === 'ceiling') continue;
     const top = p.center.y - fy;
     if (top < 0.12 || top > 2.2 || p.area < 0.03) continue;
+    if (strict && !pip(p.center.x, p.center.z, Room.floorPoly) && !nearFloorEdge(p.center.x, p.center.z, 0.3)) { Room.skipped++; continue; }
+    cand.push({ p, poly: wp.map((v) => [v.x, v.z]) });
+  }
+  // Derselbe Raum mehrfach gescannt → Möbel doppelt: bei Überlappung auf gleicher Höhe die größere Fläche behalten
+  cand.sort((a, b) => b.p.area - a.p.area);
+  const kept = [];
+  for (const c of cand) {
+    const dup = kept.some((k) => Math.abs(k.p.center.y - c.p.center.y) < 0.2 && (pip(c.p.center.x, c.p.center.z, k.poly) || pip(k.p.center.x, k.p.center.z, c.poly)));
+    if (dup) Room.skipped++; else kept.push(c);
+  }
+  for (const { p, poly } of kept) {
     // Tischplatten sind dünn (man kann drunter durch), alles andere ist ein Klotz bis zum Boden
     const thin = /table|desk/.test(p.label);
     const s = makeSolid('furn', poly, p.center.y, thin ? p.center.y - 0.05 : fy - 0.05, { label: p.label });
     World.solids.push(s);
     if (Room.fallback) {
-      const m = new THREE.Mesh(prismGeometry(poly, thin ? s.bottom : fy, s.top), fakeFurnMat); World.group.add(m);
+      World.group.add(new THREE.Mesh(prismGeometry(poly, thin ? s.bottom : fy, s.top), fakeFurnMat));
       if (thin) for (const [x, z] of poly) { const leg = new THREE.Mesh(new THREE.BoxGeometry(0.04, s.bottom - fy, 0.04), fakeFurnMat); leg.position.set(x + Math.sign(p.center.x - x) * 0.05, fy + (s.bottom - fy) / 2, z + Math.sign(p.center.z - z) * 0.05); World.group.add(leg); }
     } else {
-      const m = new THREE.Mesh(prismGeometry(poly, thin ? s.bottom : fy, s.top), occMat); m.renderOrder = -10; World.group.add(m);
+      // Verdecker nur für Möbel (Modus "Möbel"); mit Tiefensensor übernimmt die echte Tiefe
+      const m = new THREE.Mesh(prismGeometry(poly, thin ? s.bottom : fy, s.top), occMat); m.renderOrder = -10; World.occ.add(m);
     }
     // Spielflächen-Haut: warmer Schimmer + leuchtende Kante
     const fill = new THREE.Mesh(topGeometry(poly, s.top + 0.002), topMat); fill.renderOrder = 2; World.group.add(fill);
@@ -485,6 +504,79 @@ function rebuildWorld() {
     World.group.add(line);
   }
   Room.dirty = false;
+}
+
+// ---------------------------------------------------------------- Verdeckung durch die echte Welt
+// 'depth' = Tiefensensor der Quest (echte Verdeckung, auch Hände/Krempel), 'boxes' = nur gescannte Möbel, 'off' = nichts.
+const AR_MODES = { depth: 'Tiefensensor', boxes: 'Möbel-Scan', off: 'aus' };
+const AR = {
+  mode: 'boxes', hasDepth: false, bias: new THREE.Vector2(0.035, 0.015), features: [], depthInfo: null,
+  begin(session) {
+    this.features = Array.from(session.enabledFeatures || []);
+    this.hasDepth = this.features.includes('depth-sensing') && session.depthUsage === 'gpu-optimized';
+    let saved = null; try { saved = localStorage.getItem('guenther-occ'); } catch (e) { /* privat */ }
+    this.mode = saved && AR_MODES[saved] && (saved !== 'depth' || this.hasDepth) ? saved : (this.hasDepth ? 'depth' : 'boxes');
+  },
+  cycle() {
+    const order = (this.hasDepth ? ['depth'] : []).concat(['boxes', 'off']);
+    this.mode = order[(order.indexOf(this.mode) + 1) % order.length];
+    try { localStorage.setItem('guenther-occ', this.mode); } catch (e) { /* privat */ }
+  },
+  // Jedes Bild: Tiefen-Verdecker von three.js ein/aus, Schwelle nachführen
+  update() {
+    World.occ.visible = this.mode === 'boxes';
+    if (!renderer.xr.isPresenting || !this.hasDepth) return;
+    const mesh = renderer.xr.getDepthSensingMesh();
+    if (!mesh) return;
+    const u = mesh.material.uniforms;
+    if (!mesh.userData.patched) {
+      mesh.userData.patched = true;
+      u.uNear = { value: 0.1 }; u.uK = { value: 1 }; u.uBias = { value: this.bias };
+      // Wie das Original von three.js, aber die echte Tiefe wird ein paar Zentimeter nach hinten geschoben:
+      // alles im Spiel steht direkt AUF echten Flächen und würde sonst im Sensorrauschen flackern.
+      mesh.material.fragmentShader = `
+uniform sampler2DArray depthColor; uniform float depthWidth; uniform float depthHeight;
+uniform float uNear; uniform float uK; uniform vec2 uBias;
+void main() {
+  vec2 c = vec2(gl_FragCoord.x / depthWidth, gl_FragCoord.y / depthHeight);
+  float d = c.x >= 1.0 ? texture(depthColor, vec3(c.x - 1.0, c.y, 1)).r : texture(depthColor, vec3(c.x, c.y, 0)).r;
+  if (uBias.x > 0.0) {
+    float z = uNear / max(1.0 - d * uK, 1e-5);
+    z += uBias.x + uBias.y * z;
+    d = clamp((1.0 - uNear / z) / uK, 0.0, 1.0);
+  }
+  gl_FragDepth = d;
+}`;
+      mesh.material.needsUpdate = true;
+    }
+    const cam = renderer.xr.getCamera();
+    u.uNear.value = cam.near; u.uK.value = isFinite(cam.far) ? (cam.far - cam.near) / cam.far : 1;
+    mesh.visible = this.mode === 'depth';
+  },
+};
+// Raumdaten für die Fehlersuche (per USB auslesbar): localStorage 'guenther-dump'
+function roomDump(frame) {
+  const r3 = (v) => +v.toFixed(3);
+  const d = {
+    t: new Date().toISOString(), head: Player.head.toArray().map(r3), floorY: r3(Room.floorY), ceilY: r3(Room.ceilY), fallback: Room.fallback, skipped: Room.skipped,
+    ar: { mode: AR.mode, hasDepth: AR.hasDepth, features: AR.features, depth: AR.depthInfo },
+    floorPoly: Room.floorPoly?.map((q) => q.map(r3)),
+    walls: World.walls.map((w) => ({ a: w.a.map(r3), b: w.b.map(r3), y0: r3(w.y0), y1: r3(w.y1), label: w.label })),
+    solids: World.solids.map((s) => ({ label: s.label, top: r3(s.top), bottom: r3(s.bottom), poly: s.poly.map((q) => q.map(r3)) })),
+    planes: Room.planes.map((p) => ({ label: p.label, c: p.center.toArray().map(r3), n: p.normal.toArray().map(r3), area: r3(p.area), active: Room.active.includes(p),
+      poly: p.poly.map(([x, z]) => new V3(x, 0, z).applyMatrix4(p.matrix).toArray().map(r3)) })),
+    meshes: [],
+  };
+  try {
+    frame?.detectedMeshes?.forEach((m) => {
+      const v = m.vertices, min = [1e9, 1e9, 1e9], max = [-1e9, -1e9, -1e9];
+      for (let i = 0; i < v.length; i += 3) for (let k = 0; k < 3; k++) { min[k] = Math.min(min[k], v[i + k]); max[k] = Math.max(max[k], v[i + k]); }
+      const pose = frame.getPose(m.meshSpace, renderer.xr.getReferenceSpace());
+      d.meshes.push({ label: m.semanticLabel, verts: v.length / 3, min: min.map(r3), max: max.map(r3), pos: pose ? [pose.transform.position.x, pose.transform.position.y, pose.transform.position.z].map(r3) : null });
+    });
+  } catch (e) { d.meshErr = String(e); }
+  try { localStorage.setItem('guenther-dump', JSON.stringify(d)); } catch (e) { /* voll/privat */ }
+  return d;
 }
 
 const STEP = 0.045, GR = 0.035, GH = 0.15;
@@ -1242,6 +1334,7 @@ const Input = {
     if (play) { if (edge(R, 4) || edge(L, 4)) this.jump = true; }
     else {
       if (edge(R, 4)) Game.onA();
+      if (edge(R, 5) && Game.state === 'intro') { AR.cycle(); Sound.tone('triangle', 520, 700, 0.06, 0.1); }
       if (edge(L, 4)) { if (Game.state === 'intro') Setup.capture(); else Game.onA(); }
     }
     // Rechte Hand: bauen
@@ -1369,7 +1462,7 @@ const Setup = {
   update(dt) {
     this.t += dt;
     if (this.t < 1.2) return;
-    const st = this.stats(); const key = JSON.stringify(st) + this.msg + Guenther.visible;
+    const st = this.stats(); const key = JSON.stringify(st) + this.msg + Guenther.visible + AR.mode;
     if (key === this.key) return;
     this.key = key; this.clear();
     for (const s of World.solids) {
@@ -1379,8 +1472,8 @@ const Setup = {
       sp.position.set((s.min[0] + s.max[0]) / 2, s.top + 0.1, (s.min[1] + s.max[1]) / 2); this.group.add(sp);
     }
     const roomTxt = st.real ? `${st.walls} Wände · ${st.furn} Möbel · Boden ${st.floor ? 'erkannt' : 'fehlt'}` : 'Kein Raumscan gefunden: virtuelles Zimmer aktiv';
-    const keys = DESK.on ? 'Enter: Los geht’s' : 'A: Los geht’s · X: Raum neu scannen';
-    Banner.show('GÜNTHER MUSS MAL', `${this.msg ? this.msg + '\n' : ''}${roomTxt}\n${keys}\nGünther laufen lassen, springen, Klorollen bauen`, '#ffd23f', 0);
+    const keys = DESK.on ? 'Enter: Los geht’s' : `A: Los geht’s · X: Raum neu scannen\nB: Verdeckung durch echte Dinge [${AR_MODES[AR.mode]}]`;
+    Banner.show('GÜNTHER MUSS MAL', `${this.msg ? this.msg + '\n' : ''}${roomTxt}\n${keys}${DESK.on ? '\nGünther laufen lassen, springen, Klorollen bauen' : ''}`, '#ffd23f', 0);
     if (!this.commented && Guenther.visible) {
       this.commented = true;
       const lbl = st.labels.find((l) => LINES.furn[l]);
@@ -1704,11 +1797,11 @@ const Desk = {
 };
 
 // ---------------------------------------------------------------- Hauptschleife
-const clock = new THREE.Clock();
+let lastT = 0, dumpT = 0;
 let sessionTime = 0;
 const _up = new V3();
 function loop(t, frame) {
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const dt = Math.min(Math.max((t - lastT) / 1000, 0), 0.05); lastT = t;
   if (frame) {
     const ref = renderer.xr.getReferenceSpace();
     const vp = frame.getViewerPose(ref);
@@ -1724,6 +1817,8 @@ function loop(t, frame) {
     if (!Room.haveReal && !Room.fallback && sessionTime > 2.5) buildFallback();
     // Während des Spiels die Welt nur neu bauen, wenn sich echte Flächen ändern
     if (Room.dirty && (Game.state === 'intro' || sessionTime < 6)) rebuildWorld();
+    AR.update();
+    dumpT -= dt; if (dumpT <= 0 && sessionTime > 3) { dumpT = 10; roomDump(frame); }
   } else if (DESK.on) {
     Desk.update(dt);
     Sound.listener(Player.head, Player.fwd, new V3(0, 1, 0));
@@ -1761,17 +1856,24 @@ async function setup() {
   startBtn.onclick = async () => {
     Sound.init(); Sound.ctx?.resume?.();
     try {
-      const session = await navigator.xr.requestSession('immersive-ar', {
-        requiredFeatures: ['local-floor'],
-        optionalFeatures: ['plane-detection'],
-      });
+      let session;
+      try {
+        session = await navigator.xr.requestSession('immersive-ar', {
+          requiredFeatures: ['local-floor'],
+          optionalFeatures: ['plane-detection', 'mesh-detection', 'depth-sensing'],
+          depthSensing: { usagePreference: ['gpu-optimized'], dataFormatPreference: [] },
+        });
+      } catch (e) {
+        session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['local-floor'], optionalFeatures: ['plane-detection'] });
+      }
+      AR.begin(session);
       session.addEventListener('end', () => {
         Game.exit(); Setup.captureUsed = false; document.getElementById('ui').style.display = 'flex';
         Room.planes = []; Room.map.clear(); Room.haveReal = false; Room.fallback = false; Room.dirty = true; sessionTime = 0;
       });
       await renderer.xr.setSession(session);
       document.getElementById('ui').style.display = 'none';
-      sessionTime = 0;
+      sessionTime = 0; dumpT = 0;
       Game.intro();
     } catch (e) { msg.textContent = 'Start fehlgeschlagen: ' + e.message; }
   };
@@ -1781,4 +1883,4 @@ setup();
 if (new URLSearchParams(location.search).has('desk')) { Sound.init(); Desk.start(); }
 
 // Für automatisierte Tests
-window.__g = { Game, Guenther, Level, Room, World, Rolls, Cushions, Robot, Input, Player, Desk, THREE, rollCell, rollValid, groundAt, buildLevel };
+window.__g = { AR, roomDump, renderer, scene, Game, Guenther, Level, Room, World, Rolls, Cushions, Robot, Input, Player, Desk, THREE, rollCell, rollValid, groundAt, buildLevel };
