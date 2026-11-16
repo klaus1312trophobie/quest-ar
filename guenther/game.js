@@ -531,6 +531,9 @@ const AR = {
     const u = mesh.material.uniforms;
     if (!mesh.userData.patched) {
       mesh.userData.patched = true;
+      const c0 = renderer.xr.getCamera();
+      this.depthInfo = { near: c0.near, far: String(c0.far), w: u.depthWidth.value, h: u.depthHeight.value };
+      Err.crumb('depth mesh ' + JSON.stringify(this.depthInfo));
       u.uNear = { value: 0.1 }; u.uK = { value: 1 }; u.uBias = { value: this.bias };
       // Wie das Original von three.js, aber die echte Tiefe wird ein paar Zentimeter nach hinten geschoben:
       // alles im Spiel steht direkt AUF echten Flächen und würde sonst im Sensorrauschen flackern.
@@ -1800,7 +1803,48 @@ const Desk = {
 let lastT = 0, dumpT = 0;
 let sessionTime = 0;
 const _up = new V3();
+// Fehlerprotokoll und Wegmarken, per USB auslesbar (localStorage 'guenther-err' / 'guenther-crumbs').
+// Ein Fehler im Bild-Callback würde sonst die Schleife von three.js beenden: das Bild friert ein.
+const Err = {
+  list: [], seen: new Set(), crumbs: [], t0: Date.now(), renderFails: 0, lastFrame: 0, frames: 0,
+  log(where, e) {
+    const m = (where + ': ' + (e?.stack || e?.message || e)).slice(0, 700);
+    if (this.seen.has(m)) return; this.seen.add(m);
+    this.list.push({ t: new Date().toISOString(), m });
+    try { localStorage.setItem('guenther-err', JSON.stringify(this.list.slice(-20))); } catch (x) { /* privat */ }
+    console.error(m);
+  },
+  crumb(text) {
+    this.crumbs.push([+((Date.now() - this.t0) / 1000).toFixed(1), text]);
+    try { localStorage.setItem('guenther-crumbs', JSON.stringify(this.crumbs.slice(-60))); } catch (x) { /* privat */ }
+  },
+  // Tiefensensor macht Ärger → Sitzung beenden und beim nächsten Start ohne ihn
+  depthOff(why) {
+    this.crumb('depthOff: ' + why);
+    try { localStorage.setItem('guenther-nodepth', '1'); } catch (x) { /* privat */ }
+    document.getElementById('msg').textContent = 'Der Tiefensensor hat gesponnen und ist jetzt aus. Bitte nochmal „AR STARTEN“ drücken.';
+    try { renderer.xr.getSession()?.end(); } catch (x) { /* schon zu */ }
+  },
+};
+addEventListener('error', (e) => Err.log('window', e.error || e.message));
+addEventListener('unhandledrejection', (e) => Err.log('promise', e.reason));
+// Wachhund: läuft die AR-Sitzung, aber es kommen keine Bilder mehr, ist die Schleife gestorben
+setInterval(() => {
+  if (!renderer.xr.isPresenting || document.visibilityState !== 'visible' || !Err.lastFrame) return;
+  if (performance.now() - Err.lastFrame > 2500) {
+    Err.log('watchdog', 'keine Bilder seit ' + Math.round(performance.now() - Err.lastFrame) + ' ms');
+    if (AR.hasDepth) Err.depthOff('Schleife steht'); else { Err.crumb('restart loop'); Err.lastFrame = performance.now(); renderer.setAnimationLoop(loop); }
+  }
+}, 1000);
 function loop(t, frame) {
+  Err.lastFrame = performance.now();
+  if (frame && ++Err.frames === 1) Err.crumb('first frame');
+  try { tick(t, frame); } catch (e) { Err.log('tick', e); }
+  if (Game.state !== Err.state) { Err.state = Game.state; Err.crumb('state ' + Game.state + ' L' + Level.n); }
+  try { renderer.render(scene, camera); Err.renderFails = 0; }
+  catch (e) { Err.log('render', e); if (++Err.renderFails === 30 && renderer.xr.isPresenting && AR.hasDepth) Err.depthOff('render'); }
+}
+function tick(t, frame) {
   const dt = Math.min(Math.max((t - lastT) / 1000, 0), 0.05); lastT = t;
   if (frame) {
     const ref = renderer.xr.getReferenceSpace();
@@ -1839,7 +1883,6 @@ function loop(t, frame) {
   updateFx(dt);
   HUD.update(dt);
   Banner.update(dt);
-  renderer.render(scene, camera);
 }
 
 // ---------------------------------------------------------------- Start
@@ -1856,26 +1899,33 @@ async function setup() {
   startBtn.onclick = async () => {
     Sound.init(); Sound.ctx?.resume?.();
     try {
-      let session;
+      let session, noDepth = false;
+      const q = new URLSearchParams(location.search);
+      try { noDepth = q.has('nodepth') || (localStorage.getItem('guenther-nodepth') === '1' && !q.has('depth')); } catch (e) { /* privat */ }
+      const opt = ['plane-detection'].concat(q.has('nomesh') ? [] : ['mesh-detection'], noDepth ? [] : ['depth-sensing']);
+      Err.crumbs = []; Err.t0 = Date.now(); Err.frames = 0; Err.lastFrame = 0; Err.crumb('request ' + opt.join(','));
       try {
         session = await navigator.xr.requestSession('immersive-ar', {
-          requiredFeatures: ['local-floor'],
-          optionalFeatures: ['plane-detection', 'mesh-detection', 'depth-sensing'],
-          depthSensing: { usagePreference: ['gpu-optimized'], dataFormatPreference: [] },
+          requiredFeatures: ['local-floor'], optionalFeatures: opt,
+          ...(noDepth ? {} : { depthSensing: { usagePreference: ['gpu-optimized'], dataFormatPreference: [] } }),
         });
       } catch (e) {
+        Err.log('requestSession', e);
         session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['local-floor'], optionalFeatures: ['plane-detection'] });
       }
       AR.begin(session);
+      Err.crumb('session ' + AR.features.join(',') + ' depthUsage=' + session.depthUsage + ' fmt=' + session.depthDataFormat);
       session.addEventListener('end', () => {
+        Err.crumb('session end, frames=' + Err.frames);
         Game.exit(); Setup.captureUsed = false; document.getElementById('ui').style.display = 'flex';
         Room.planes = []; Room.map.clear(); Room.haveReal = false; Room.fallback = false; Room.dirty = true; sessionTime = 0;
       });
       await renderer.xr.setSession(session);
+      Err.crumb('setSession ok');
       document.getElementById('ui').style.display = 'none';
       sessionTime = 0; dumpT = 0;
       Game.intro();
-    } catch (e) { msg.textContent = 'Start fehlgeschlagen: ' + e.message; }
+    } catch (e) { Err.log('start', e); msg.textContent = 'Start fehlgeschlagen: ' + e.message; }
   };
 }
 renderer.setAnimationLoop(loop);
@@ -1883,4 +1933,4 @@ setup();
 if (new URLSearchParams(location.search).has('desk')) { Sound.init(); Desk.start(); }
 
 // Für automatisierte Tests
-window.__g = { AR, roomDump, renderer, scene, Game, Guenther, Level, Room, World, Rolls, Cushions, Robot, Input, Player, Desk, THREE, rollCell, rollValid, groundAt, buildLevel };
+window.__g = { Err, AR, roomDump, renderer, scene, Game, Guenther, Level, Room, World, Rolls, Cushions, Robot, Input, Player, Desk, THREE, rollCell, rollValid, groundAt, buildLevel };
