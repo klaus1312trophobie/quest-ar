@@ -342,6 +342,22 @@ function updateRealPlanes(frame, ref) {
   for (const [xp, p] of Room.map) if (!seen.has(xp)) { Room.planes.splice(Room.planes.indexOf(p), 1); Room.map.delete(xp); Room.dirty = true; }
   if (Room.map.size > 0 && !Room.haveReal) { Room.haveReal = true; if (Room.fallback) clearFallback(); }
 }
+// Möbel-Quader aus der Mesh-Erkennung: sagen, wie weit ein Möbel unter seiner Oberseite wirklich reicht
+// (ein Hängeregal ist nur ein Brett, kein Klotz bis zum Boden). Lokale z-Achse des Quaders zeigt nach oben.
+let boxT = 0;
+function updateBoxes(frame, ref, dt) {
+  boxT -= dt; if (boxT > 0 || !frame.detectedMeshes) return; boxT = 2;
+  const boxes = [];
+  frame.detectedMeshes.forEach((m) => {
+    const v = m.vertices; if (!v || v.length !== 24) return;
+    const pose = frame.getPose(m.meshSpace, ref); if (!pose) return;
+    let zmin = 0; for (let i = 2; i < 24; i += 3) zmin = Math.min(zmin, v[i]);
+    const q = pose.transform.position;
+    boxes.push({ x: q.x, y: q.y, z: q.z, depth: -zmin });
+  });
+  const key = boxes.map((b) => [b.x, b.y, b.z, b.depth].map((n) => n.toFixed(2)).join()).sort().join('|');
+  if (key !== Room.boxKey) { Room.boxKey = key; Room.boxes = boxes; Room.dirty = true; }
+}
 function containsXZ(p, pos) { _la.copy(pos).applyMatrix4(p.inv); return pip(_la.x, _la.z, p.poly); }
 // Die Quest kann Flächen mehrerer gescannter Räume liefern (auch anderer Stockwerke):
 // Boden = nächster Boden unter dem Kopf, Decke = nächste darüber, der Rest wird ignoriert.
@@ -487,13 +503,15 @@ function rebuildWorld() {
     if (dup) Room.skipped++; else kept.push(c);
   }
   for (const { p, poly } of kept) {
-    // Tischplatten sind dünn (man kann drunter durch), alles andere ist ein Klotz bis zum Boden
-    const thin = /table|desk/.test(p.label);
-    const s = makeSolid('furn', poly, p.center.y, thin ? p.center.y - 0.05 : fy - 0.05, { label: p.label });
+    // Unterkante: aus dem Möbel-Quader der Quest, sonst geraten (Tischplatten dünn, alles andere Klotz bis zum Boden)
+    const box = (Room.boxes || []).find((b) => Math.abs(b.y - p.center.y) < 0.05 && Math.hypot(b.x - p.center.x, b.z - p.center.z) < 0.08);
+    const floats = box && p.center.y - box.depth > fy + 0.1;
+    const thin = floats || /table|desk/.test(p.label);
+    const s = makeSolid('furn', poly, p.center.y, floats ? p.center.y - Math.max(box.depth, 0.03) : thin ? p.center.y - 0.05 : fy - 0.05, { label: p.label });
     World.solids.push(s);
     if (Room.fallback) {
       World.group.add(new THREE.Mesh(prismGeometry(poly, thin ? s.bottom : fy, s.top), fakeFurnMat));
-      if (thin) for (const [x, z] of poly) { const leg = new THREE.Mesh(new THREE.BoxGeometry(0.04, s.bottom - fy, 0.04), fakeFurnMat); leg.position.set(x + Math.sign(p.center.x - x) * 0.05, fy + (s.bottom - fy) / 2, z + Math.sign(p.center.z - z) * 0.05); World.group.add(leg); }
+      if (thin && !floats) for (const [x, z] of poly) { const leg = new THREE.Mesh(new THREE.BoxGeometry(0.04, s.bottom - fy, 0.04), fakeFurnMat); leg.position.set(x + Math.sign(p.center.x - x) * 0.05, fy + (s.bottom - fy) / 2, z + Math.sign(p.center.z - z) * 0.05); World.group.add(leg); }
     } else {
       // Verdecker nur für Möbel (Modus "Möbel"); mit Tiefensensor übernimmt die echte Tiefe
       const m = new THREE.Mesh(prismGeometry(poly, thin ? s.bottom : fy, s.top), occMat); m.renderOrder = -10; World.occ.add(m);
@@ -1857,6 +1875,7 @@ function tick(t, frame) {
       Sound.listener(Player.head, Player.fwd, _up);
     }
     updateRealPlanes(frame, ref);
+    updateBoxes(frame, ref, dt);
     sessionTime += dt;
     if (!Room.haveReal && !Room.fallback && sessionTime > 2.5) buildFallback();
     // Während des Spiels die Welt nur neu bauen, wenn sich echte Flächen ändern
@@ -1918,7 +1937,7 @@ async function setup() {
       session.addEventListener('end', () => {
         Err.crumb('session end, frames=' + Err.frames);
         Game.exit(); Setup.captureUsed = false; document.getElementById('ui').style.display = 'flex';
-        Room.planes = []; Room.map.clear(); Room.haveReal = false; Room.fallback = false; Room.dirty = true; sessionTime = 0;
+        Room.planes = []; Room.map.clear(); Room.boxes = []; Room.boxKey = ''; Room.haveReal = false; Room.fallback = false; Room.dirty = true; sessionTime = 0;
       });
       await renderer.xr.setSession(session);
       Err.crumb('setSession ok');
