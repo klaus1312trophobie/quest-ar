@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Günther muss mal</title>
+<meta name="theme-color" content="#1a1206">
+<style>
+  :root { --bg:#1a1206; --fg:#fff4dc; --gold:#ffd23f; --beer:#ff9f1c; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); font-family:system-ui,sans-serif; }
+  #ui { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:16px; text-align:center; z-index:2; overflow:auto;
+        background: radial-gradient(circle at 50% 35%, #4a3110 0%, var(--bg) 70%); }
+  h1 { font-size:clamp(40px,8vw,84px); margin:0; line-height:1; letter-spacing:.02em; color:var(--gold); text-shadow:0 4px 0 #7a4b00, 0 0 40px #ffd23f55; }
+  p { max-width:600px; line-height:1.5; margin:0; opacity:.92; }
+  button { font-size:26px; font-weight:800; padding:16px 40px; border-radius:999px; border:0; cursor:pointer; color:#1a1206;
+           background:linear-gradient(180deg,#ffe27a,var(--beer)); box-shadow:0 6px 0 #9a5a00, 0 0 40px #ff9f1c55; }
+  button:disabled { opacity:.35; cursor:default; box-shadow:none; }
+  button.alt { font-size:16px; padding:10px 24px; background:#3a2a10; color:var(--fg); box-shadow:none; }
+  ul { text-align:left; max-width:600px; margin:0; padding-left:20px; line-height:1.6; opacity:.88; }
+  #msg { color:#ffb08a; min-height:1.5em; }
+  canvas { position:fixed; inset:0; }
+  .fsk { font-size:13px; opacity:.6; }
+  #deskhelp { position:fixed; left:8px; bottom:8px; z-index:3; font-size:13px; background:#000a; padding:8px 12px; border-radius:8px; display:none; line-height:1.5; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <h1>GÜNTHER<br>MUSS MAL</h1>
+  <p>Günther ist 15 cm groß, hat drei Bier intus und muss <b>dringend</b> aufs Klo. Das Klo steht natürlich irgendwo oben auf deinen Möbeln. Bau ihm aus Klopapierrollen einen Weg dorthin, bevor die Blase platzt.</p>
+  <ul>
+    <li><b>Linker Stick:</b> Günther laufen lassen. <b>A oder X:</b> springen.</li>
+    <li><b>Rechter Abzug:</b> Klopapierrolle an die Controllerspitze setzen (schwebt, frag nicht).</li>
+    <li><b>Rechte Griff-Taste:</b> Furzkissen hinlegen. Draufspringen = Raketenstart.</li>
+    <li><b>B:</b> Rolle oder Kissen an der Spitze wieder wegnehmen.</li>
+    <li><b>Linker Abzug:</b> auf eine Stelle zeigen, Günther latscht hin.</li>
+    <li><b>Linke Griff-Taste:</b> Günther zurück zum letzten sicheren Platz.</li>
+    <li><b>Y 1 Sekunde halten:</b> Spiel beenden.</li>
+  </ul>
+  <button id="start" disabled>Prüfe AR …</button>
+  <button id="desk" class="alt">Am PC ausprobieren (ohne Brille)</button>
+  <div id="msg"></div>
+  <div class="fsk">Enthält Fäkalhumor und derbe Sprache. Ab 16.</div>
+</div>
+<div id="deskhelp">PC-Modus · Pfeiltasten: Günther · Leertaste: Sprung · Maus ziehen: umsehen · WASD: gehen<br>Linksklick: Rolle · Rechtsklick: Furzkissen · E: wegnehmen · F: hierher · R: Checkpoint · Enter: Start/Weiter</div>
+<script type="module" src="./game.js?v=1"></script>
+</body>
+</html>
